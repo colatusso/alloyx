@@ -7,7 +7,13 @@ import java.util.List;
 // prototype); the front-end could later be swapped for ANTLR without touching it.
 
 // --- declarations
-record ClassDecl(String name, List<MethodDecl> methods, List<Field> fields, String superclass) {}
+// `inners` are nested type declarations (Apex inner classes); empty for a flat class.
+record ClassDecl(String name, List<MethodDecl> methods, List<Field> fields,
+                 String superclass, List<ClassDecl> inners) {
+    ClassDecl(String name, List<MethodDecl> methods, List<Field> fields, String superclass) {
+        this(name, methods, fields, superclass, List.of());
+    }
+}
 
 record Field(String type, String name, Expr init, boolean isStatic) {}
 

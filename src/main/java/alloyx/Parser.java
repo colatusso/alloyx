@@ -153,19 +153,27 @@ final class Parser {
             consumeType();
             while (accept(",")) consumeType();
         }
+        return parseClassBody(name, superclass);
+    }
+
+    // Parse a class body from the opening '{' onward. Shared by the top-level class
+    // and inner classes (which reach here already past their `class Name extends ...`).
+    private ClassDecl parseClassBody(String name, String superclass) {
         expect("{");
         List<MethodDecl> methods = new ArrayList<>();
         List<Field> fields = new ArrayList<>();
+        List<ClassDecl> inners = new ArrayList<>();
         while (!at("}")) {
             Object member = parseMember(name);
-            if (member == null) continue; // tolerated inner type / static{} block
+            if (member == null) continue; // tolerated inner interface/enum / static{} block
             if (member instanceof Field f) fields.add(f);
+            else if (member instanceof ClassDecl inner) inners.add(inner); // nested class
             else if (member instanceof List<?> group) {
                 for (Object g : group) fields.add((Field) g); // several fields on one line
             } else methods.add((MethodDecl) member);
         }
         expect("}");
-        return new ClassDecl(name, methods, fields, superclass);
+        return new ClassDecl(name, methods, fields, superclass, inners);
     }
 
     private Object parseMember(String className) {
@@ -208,13 +216,21 @@ final class Parser {
             return new MethodDecl(name, isStatic, returnType, params, body, anns, lineNum(memberStart));
         }
         if (at("{")) {
-            // property (Type name { get; set; }) or static{}/inner-type block
-            boolean isTypeMember = parts.contains("class") || parts.contains("interface")
-                || parts.contains("enum");
+            // a real inner class is parsed (not discarded): the cursor is at its body's
+            // '{', and the name/superclass were captured among `parts` (... class Name
+            // [extends Super] [implements ...]). Interfaces/enums stay tolerated for now.
+            if (parts.contains("class")) {
+                String innerName = parts.get(parts.indexOf("class") + 1);
+                String sup = parts.contains("extends")
+                    ? parts.get(parts.indexOf("extends") + 1) : null;
+                return parseClassBody(innerName, sup);
+            }
+            // property (Type name { get; set; }) or static{}/inner interface|enum block
+            boolean isTypeMember = parts.contains("interface") || parts.contains("enum");
             skipBalancedBraces();
             accept(";"); // tolerate a trailing ';'
             if (isTypeMember || parts.size() < 2) {
-                return null; // inner type or static initializer — tolerated, not emitted
+                return null; // inner interface/enum or static initializer — not emitted
             }
             // auto-property modelled as a plain field (get/set body, if any, is dropped)
             return new Field(parts.get(parts.size() - 2), name, null, isStatic);

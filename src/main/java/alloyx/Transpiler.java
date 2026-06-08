@@ -49,6 +49,9 @@ final class Transpiler {
     private static final Set<String> SCHEMA_TYPES = Set.of("SObjectType", "DescribeSObjectResult");
     // native Apex System types backed by runtime classes (not dynamic sObjects)
     private static final Set<String> RUNTIME_TYPES = Set.of("Pattern", "Matcher", "LoggingLevel", "Limits");
+    // native Apex enums whose members are referenced case-insensitively (LoggingLevel.Info ==
+    // LoggingLevel.INFO); the runtime backs them with canonical UPPER_CASE constants
+    private static final Set<String> RUNTIME_ENUMS = Set.of("LoggingLevel");
     // String instance methods Java's String lacks (or returns a different type for):
     // routed to the Strings helper as Strings.method(theString, ...)
     private static final Set<String> APEX_STRING_METHODS = Set.of(
@@ -76,10 +79,14 @@ final class Transpiler {
     // sObjects with a generated typed class (described via sync); empty -> everything
     // stays the generic dynamic SObject, byte-for-byte the pre-typing behavior
     private final Set<String> typedSObjects;
-    // light type tracking so sObject field access (a.Name) becomes a.get("Name")
-    private final java.util.Map<String, String> fieldTypes = new java.util.HashMap<>();
+    // light type tracking so sObject field access (a.Name) becomes a.get("Name").
+    // fieldTypes is swapped per class body (outer vs inner) as emission descends.
+    private java.util.Map<String, String> fieldTypes = new java.util.HashMap<>();
     private final java.util.Map<String, String> locals = new java.util.HashMap<>();
     private String currentReturnType = "void";
+    // inner (nested) class names — both simple (Inner) and qualified (Outer.Inner) —
+    // so references resolve as a user type, never the fallback dynamic SObject
+    private final Set<String> innerTypes = new java.util.HashSet<>();
 
     private Transpiler(Set<String> userClasses, SchemaProvider schema, Set<String> typedSObjects) {
         this.userClasses = userClasses;
@@ -142,20 +149,46 @@ final class Transpiler {
     }
 
     private Result emitClass(ClassDecl cls) {
+        registerInnerTypes(cls);
         StringBuilder sb = new StringBuilder();
         sb.append(IMPORTS).append("\n\n");
         // the Apex->Java generics bridging (raw/Object casts) is intentional; hide the
         // unchecked notes — they're noise to the end user, not actionable
         sb.append("@SuppressWarnings(\"unchecked\")\n");
-        sb.append("public class ").append(cls.name());
+        sb.append("public ");
+        emitClassBody(cls, java.util.Map.of(), "", sb);
+        return new Result(cls.name(), sb.toString());
+    }
+
+    // Record every inner class under both its simple and Outer.Inner name (Apex nests
+    // only one level), so mapType resolves them to a real user type, not an sObject.
+    private void registerInnerTypes(ClassDecl cls) {
+        for (ClassDecl inner : cls.inners()) {
+            innerTypes.add(inner.name());
+            innerTypes.add(cls.name() + "." + inner.name());
+        }
+    }
+
+    // Emit a class body from its header onward at the given indent. The caller writes the
+    // leading "public "/"static " modifier. `outerStatics` are the enclosing class's static
+    // fields, visible to an inner class (which, like a Java static nested class, sees only
+    // the outer statics — Apex inner classes carry no outer instance).
+    private void emitClassBody(ClassDecl cls, java.util.Map<String, String> outerStatics,
+                               String indent, StringBuilder sb) {
+        java.util.Map<String, String> myFields = new java.util.LinkedHashMap<>(outerStatics);
+        for (Field f : cls.fields()) myFields.put(f.name(), f.type());
+        this.fieldTypes = myFields;
+
+        sb.append("class ").append(cls.name());
         if (cls.superclass() != null) {
             sb.append(" extends ").append(mapType(cls.superclass()));
         }
         sb.append(" {\n");
+        String member = indent + "    ";
+        String stmt = member + "    ";
 
         for (Field f : cls.fields()) {
-            fieldTypes.put(f.name(), f.type());
-            sb.append("    ");
+            sb.append(member);
             if (f.isStatic()) sb.append("static ");
             sb.append(mapType(f.type())).append(' ').append(f.name());
             if (f.init() != null) sb.append(" = ").append(emitExpr(f.init()));
@@ -169,8 +202,8 @@ final class Transpiler {
         boolean hasCtor = cls.methods().stream().anyMatch(m -> m.name().equals(cls.name()));
         if (isException && !hasCtor) {
             sb.append('\n');
-            sb.append("    public ").append(cls.name()).append("() { super(); }\n");
-            sb.append("    public ").append(cls.name())
+            sb.append(member).append("public ").append(cls.name()).append("() { super(); }\n");
+            sb.append(member).append("public ").append(cls.name())
               .append("(String message) { super(message); }\n");
         }
 
@@ -185,7 +218,7 @@ final class Transpiler {
             locals.putAll(fieldTypes);
             for (Param p : m.params()) locals.put(p.name(), p.type());
             currentReturnType = isCtor ? "void" : m.returnType();
-            sb.append("    public ");
+            sb.append(member).append("public ");
             if (m.isStatic()) sb.append("static ");
             if (!isCtor) sb.append(mapType(m.returnType())).append(' ');
             sb.append(m.name()).append('(');
@@ -195,12 +228,20 @@ final class Transpiler {
                 sb.append(mapType(p.type())).append(' ').append(p.name());
             }
             sb.append(") {\n");
-            for (Stmt s : m.body()) emitStmt(s, "        ", sb);
-            sb.append("    }\n");
+            for (Stmt s : m.body()) emitStmt(s, stmt, sb);
+            sb.append(member).append("}\n");
         }
 
-        sb.append("}\n");
-        return new Result(cls.name(), sb.toString());
+        // nested classes, emitted as Java static nested classes
+        java.util.Map<String, String> myStatics = new java.util.LinkedHashMap<>(outerStatics);
+        for (Field f : cls.fields()) if (f.isStatic()) myStatics.put(f.name(), f.type());
+        for (ClassDecl inner : cls.inners()) {
+            sb.append('\n').append(member).append("static ");
+            emitClassBody(inner, myStatics, member, sb);
+        }
+
+        sb.append(indent).append("}\n");
+        this.fieldTypes = myFields; // restore this body's view for any trailing use
     }
 
     // --- statements
@@ -384,7 +425,7 @@ final class Transpiler {
             case Str s -> '"' + escape(s.value()) + '"';
             case Bool b -> String.valueOf(b.value());
             case Null ignored -> "null";
-            case Name n -> n.ident();
+            case Name n -> canonicalName(n.ident());
             // ++/-- must stay bare: "(++i);" is not a valid Java statement
             case Unary u -> u.op().equals("++") || u.op().equals("--")
                 ? u.op() + emitExpr(u.operand())
@@ -433,6 +474,14 @@ final class Transpiler {
     }
 
     private String emitProp(Prop p) {
+        // native Apex enum member access is case-insensitive (LoggingLevel.Info); the runtime
+        // enum constants are canonical UPPER_CASE, so fold the member to match
+        if (p.target() instanceof Name tn) {
+            String runtimeEnum = runtimeEnum(tn.ident());
+            if (runtimeEnum != null) {
+                return runtimeEnum + "." + p.name().toUpperCase(java.util.Locale.ROOT);
+            }
+        }
         String parent = sObjectTypeOf(p.target());
         if (parent == null) {
             return emitExpr(p.target()) + "." + p.name(); // regular Java field/member
@@ -470,6 +519,29 @@ final class Transpiler {
 
     private static String lowerFirst(String s) {
         return s.isEmpty() ? s : Character.toLowerCase(s.charAt(0)) + s.substring(1);
+    }
+
+    // the canonical runtime enum whose name matches case-insensitively, or null
+    private static String runtimeEnum(String ident) {
+        for (String e : RUNTIME_ENUMS) {
+            if (e.equalsIgnoreCase(ident)) return e;
+        }
+        return null;
+    }
+
+    // Apex identifiers are case-insensitive; Java's aren't. Resolve a referenced name to
+    // the exact spelling of the matching declared field/param/local so a use that differs
+    // only in case (stacktrace vs stackTrace) still binds. Unknown names pass through.
+    private String canonicalName(String ident) {
+        if (ident.equals("this") || locals.containsKey(ident)) {
+            return ident;
+        }
+        for (String declared : locals.keySet()) {
+            if (declared.equalsIgnoreCase(ident)) {
+                return declared;
+            }
+        }
+        return ident;
     }
 
     private String emitMapLit(MapLit m) {
@@ -663,6 +735,9 @@ final class Transpiler {
             // invariant, so emit the raw type to mirror Apex's permissiveness (a List<String>
             // can then be passed where a List<Object> is expected, as in Apex)
             return generics.equals("<Object>") ? base : base + generics;
+        }
+        if (innerTypes.contains(base)) { // nested class: emit by its simple Java name
+            return base.contains(".") ? base.substring(base.lastIndexOf('.') + 1) : base;
         }
         if (userClasses.contains(base)) return base;
         if (typedSObjects.contains(base)) return base; // generated typed sObject class
