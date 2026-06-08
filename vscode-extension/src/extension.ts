@@ -79,8 +79,132 @@ function getOutline(absFile: string): Promise<Outline | undefined> {
 }
 
 // ---------------------------------------------------------------------------
-// CodeLens provider: one lens per static method ("▶ Run") and per @isTest
-// method ("▶ Test"). Methods that are neither get no lens in v0.
+// Run. One path for "run this method", whether triggered from the CodeLens
+// above the method or from the right-click menu:
+//   - no parameters  -> run it straight away
+//   - has parameters -> open a buffer with the call pre-written (one typed
+//     placeholder per argument), the dev fills the values and hits ▶ Run
+// Either way it executes locally on the JVM; results print to the "AlloyX"
+// output panel. `allx eval` is the engine underneath — never surfaced to the
+// user, who only ever sees "Run".
+// ---------------------------------------------------------------------------
+const output = vscode.window.createOutputChannel("AlloyX");
+
+// run buffers we opened -> the classes dir to resolve against + a label to show.
+const runBuffers = new Map<string, { dir: string; label: string }>();
+const runLenses = new vscode.EventEmitter<void>();
+
+/**
+ * A ready-to-run call for a method. Arguments are left as `/* Type name *\/`
+ * placeholders — never a guessed default — so the dev sees exactly what each
+ * slot expects, and `allx check` flags the empty slots until they're filled.
+ * Static methods call `Class.m(...)`; instance methods `new Class().m(...)`.
+ */
+function buildCallStub(klass: string, m: OutlineMethod): string {
+  const args = (m.params ?? []).map((p) => `/* ${p.type} ${p.name} */`).join(", ");
+  const receiver = m.static ? klass : `new ${klass}()`;
+  const call = `${receiver}.${m.name}(${args})`;
+  // wrap a returning method in System.debug so its result prints
+  return m.returnType && m.returnType !== "void" ? `System.debug(${call});` : `${call};`;
+}
+
+/**
+ * The single run path: execute an Apex snippet locally via `allx eval` and stream
+ * the result to the AlloyX panel, headed by "▶ Run <label>". The CLI command is an
+ * implementation detail — the user sees "Run", not "eval".
+ */
+function runSnippet(snippet: string, dir: string, label: string): void {
+  output.show(true);
+  output.appendLine(`\n▶ Run  ${label}`);
+  const child = execFile(
+    cliPath(),
+    ["eval", "--stdin", "--dir", dir],
+    { env: execEnv(), timeout: 60000, maxBuffer: 8 * 1024 * 1024 },
+    (err, stdout, stderr) => {
+      if (stdout) {
+        output.append(stdout);
+      }
+      if (stderr) {
+        output.append(stderr);
+      }
+      if (err && !stdout && !stderr) {
+        output.appendLine(String(err));
+      }
+    }
+  );
+  child.stdin?.end(snippet);
+}
+
+/** Open a buffer pre-filled with the call so the dev can fill args, then ▶ Run. */
+async function openRunBuffer(file: string, klass: string, m: OutlineMethod): Promise<void> {
+  const label = `${klass}.${m.name}`;
+  const header = `// Run ${label} — fill in the arguments, then ▶ Run (above). Runs locally.`;
+  const content = `${header}\n${buildCallStub(klass, m)}\n`;
+  const doc = await vscode.workspace.openTextDocument({ language: "apex", content });
+  runBuffers.set(doc.uri.toString(), { dir: path.dirname(file), label });
+  runLenses.fire(); // make the "▶ Run" lens show up on the fresh buffer
+  await vscode.window.showTextDocument(doc);
+}
+
+/** Single entry point: run now if there are no args, else open a buffer to fill them. */
+async function runMethod(file: string, klass: string, m: OutlineMethod): Promise<void> {
+  if (!m.params || m.params.length === 0) {
+    runSnippet(buildCallStub(klass, m), path.dirname(file), `${klass}.${m.name}`);
+  } else {
+    await openRunBuffer(file, klass, m);
+  }
+}
+
+/** The method whose signature line is nearest at/above the given (1-based) line. */
+function methodAtLine(outline: Outline, line1: number): OutlineMethod | undefined {
+  let best: OutlineMethod | undefined;
+  for (const m of outline.methods) {
+    if (m.line <= line1 && (!best || m.line > best.line)) {
+      best = m;
+    }
+  }
+  return best;
+}
+
+/** Right-click handler: run the method under the cursor. */
+async function runMethodAtCursor(): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || !editor.document.uri.fsPath.endsWith(".cls")) {
+    return;
+  }
+  const file = editor.document.uri.fsPath;
+  const outline = await getOutline(file);
+  if (!outline) {
+    vscode.window.showWarningMessage("AlloyX: couldn't parse this file.");
+    return;
+  }
+  const m = methodAtLine(outline, editor.selection.active.line + 1);
+  if (!m) {
+    vscode.window.showWarningMessage("AlloyX: put the cursor inside a method to run it.");
+    return;
+  }
+  await runMethod(file, outline.class, m);
+}
+
+/** Run the active run-buffer (its ▶ Run lens). */
+function runBuffer(uriStr?: string): void {
+  const doc = vscode.window.activeTextEditor?.document;
+  if (!doc) {
+    return;
+  }
+  const key = uriStr ?? doc.uri.toString();
+  const info = runBuffers.get(key);
+  const dir =
+    info?.dir ??
+    vscode.workspace.getWorkspaceFolder(doc.uri)?.uri.fsPath ??
+    vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
+    path.dirname(doc.uri.fsPath);
+  runSnippet(doc.getText(), dir, info?.label ?? "anonymous Apex");
+}
+
+// ---------------------------------------------------------------------------
+// CodeLens: "▶ Run" / "▶ Test" above each static / @isTest method, and a single
+// "▶ Run" at the top of a run-buffer. Both route into the one run path above.
 // ---------------------------------------------------------------------------
 class ApexCodeLensProvider implements vscode.CodeLensProvider {
   async provideCodeLenses(
@@ -96,19 +220,16 @@ class ApexCodeLensProvider implements vscode.CodeLensProvider {
       const isTest = method.isTest === true;
       const isStatic = method.static === true;
       if (!isTest && !isStatic) {
-        continue; // v0: only static or test methods get a lens
+        continue; // only static or test methods get a lens
       }
-
       // `line` is 1-based; VSCode ranges are 0-based.
       const lineIdx = Math.max(0, method.line - 1);
       const range = new vscode.Range(lineIdx, 0, lineIdx, 0);
-      const params = method.params ?? [];
-
       lenses.push(
         new vscode.CodeLens(range, {
           title: isTest ? "▶ Test" : "▶ Run",
           command: "alloyx.runMethod",
-          arguments: [document.uri.fsPath, outline.class, method.name, params],
+          arguments: [document.uri.fsPath, outline.class, method],
         })
       );
     }
@@ -116,64 +237,21 @@ class ApexCodeLensProvider implements vscode.CodeLensProvider {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Terminal handling: reuse a single named "AlloyX" terminal.
-// ---------------------------------------------------------------------------
-function getTerminal(): vscode.Terminal {
-  const existing = vscode.window.terminals.find((t) => t.name === "AlloyX");
-  return existing ?? vscode.window.createTerminal("AlloyX");
-}
-
-/** Quote an argument for the shell only if it contains whitespace/specials. */
-function shellQuote(value: string): string {
-  if (/^[A-Za-z0-9._/:=-]+$/.test(value)) {
-    return value;
-  }
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-/**
- * Command handler invoked by the CodeLens (or manually). Runs
- * `allx run <file> --method <Class>.<method> [--args v1 v2 ...]`
- * in the shared terminal. Prompts for args when the method has params.
- */
-async function runMethod(
-  file: string,
-  klass: string,
-  method: string,
-  params: OutlineParam[] | undefined
-): Promise<void> {
-  const argParts: string[] = [];
-
-  if (params && params.length > 0) {
-    const hint = params.map((p) => `${p.type} ${p.name}`).join(", ");
-    const input = await vscode.window.showInputBox({
-      title: `Arguments for ${klass}.${method}`,
-      prompt: `Space-separated values for: ${hint}`,
-      placeHolder: params.map((p) => p.name).join(" "),
-    });
-    // Cancelled (Esc) → abort. Empty string is allowed (user chose no args).
-    if (input === undefined) {
-      return;
+/** Puts a single "▶ Run" lens at the top of the run-buffers we created. */
+class RunBufferCodeLensProvider implements vscode.CodeLensProvider {
+  onDidChangeCodeLenses = runLenses.event;
+  provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
+    if (!runBuffers.has(document.uri.toString())) {
+      return [];
     }
-    const trimmed = input.trim();
-    if (trimmed.length > 0) {
-      argParts.push("--args", ...trimmed.split(/\s+/));
-    }
+    return [
+      new vscode.CodeLens(new vscode.Range(0, 0, 0, 0), {
+        title: "▶ Run",
+        command: "alloyx.runBuffer",
+        arguments: [document.uri.toString()],
+      }),
+    ];
   }
-
-  const parts = [
-    shellQuote(cliPath()),
-    "run",
-    shellQuote(file),
-    "--method",
-    shellQuote(`${klass}.${method}`),
-    ...argParts.map(shellQuote),
-  ];
-
-  const terminal = getTerminal();
-  terminal.show();
-  terminal.sendText(parts.join(" "));
 }
 
 // ---------------------------------------------------------------------------
@@ -245,129 +323,6 @@ async function refreshDiagnostics(
 }
 
 // ---------------------------------------------------------------------------
-// Anonymous Apex ("scratch") run. Right-clicking a method runs it; when the
-// method takes parameters there's nothing sensible to type into a dialog for an
-// sObject or a List, so instead we open a scratch buffer with the call already
-// written out (one typed placeholder per argument). The dev fills the values and
-// runs the buffer as an anonymous block via `allx eval` — locally, on the JVM.
-// ---------------------------------------------------------------------------
-const output = vscode.window.createOutputChannel("AlloyX");
-
-// scratch buffers we created -> the classes dir their snippet resolves against,
-// so `allx eval --dir` can find the called class and its dependencies.
-const scratchDirs = new Map<string, string>();
-const scratchLenses = new vscode.EventEmitter<void>();
-
-/**
- * A ready-to-run call for a method. Arguments are left as `/* Type name *\/`
- * placeholders — never a guessed default — so the dev sees exactly what each
- * slot expects, and `allx check` flags the empty slots until they're filled.
- */
-function buildCallStub(klass: string, m: OutlineMethod): string {
-  const args = (m.params ?? []).map((p) => `/* ${p.type} ${p.name} */`).join(", ");
-  const call = `${klass}.${m.name}(${args})`;
-  // wrap a returning method in System.debug so its result prints
-  return m.returnType && m.returnType !== "void" ? `System.debug(${call});` : `${call};`;
-}
-
-/** Open a scratch buffer pre-filled with the call; the dev fills args and runs it. */
-async function openScratch(file: string, klass: string, m: OutlineMethod): Promise<void> {
-  const header =
-    "// AlloyX scratch — fill in the arguments, then ▶ Run (above). Runs locally.";
-  const content = `${header}\n${buildCallStub(klass, m)}\n`;
-  const doc = await vscode.workspace.openTextDocument({ language: "apex", content });
-  scratchDirs.set(doc.uri.toString(), path.dirname(file));
-  scratchLenses.fire(); // make the "▶ Run" lens show up on the fresh buffer
-  await vscode.window.showTextDocument(doc);
-}
-
-/** The method whose signature line is nearest at/above the given (1-based) line. */
-function methodAtLine(outline: Outline, line1: number): OutlineMethod | undefined {
-  let best: OutlineMethod | undefined;
-  for (const m of outline.methods) {
-    if (m.line <= line1 && (!best || m.line > best.line)) {
-      best = m;
-    }
-  }
-  return best;
-}
-
-/** Right-click handler: run the method under the cursor (scratch if it has params). */
-async function runMethodAtCursor(): Promise<void> {
-  const editor = vscode.window.activeTextEditor;
-  if (!editor || !editor.document.uri.fsPath.endsWith(".cls")) {
-    return;
-  }
-  const file = editor.document.uri.fsPath;
-  const outline = await getOutline(file);
-  if (!outline) {
-    vscode.window.showWarningMessage("AlloyX: couldn't parse this file.");
-    return;
-  }
-  const m = methodAtLine(outline, editor.selection.active.line + 1);
-  if (!m) {
-    vscode.window.showWarningMessage("AlloyX: put the cursor inside a method to run it.");
-    return;
-  }
-  if (!m.params || m.params.length === 0) {
-    await runMethod(file, outline.class, m.name, m.params); // no args -> run straight away
-  } else {
-    await openScratch(file, outline.class, m);
-  }
-}
-
-/** Run the active scratch buffer as anonymous Apex (`allx eval --stdin`). */
-function runScratch(uriStr?: string): void {
-  const doc = vscode.window.activeTextEditor?.document;
-  if (!doc) {
-    return;
-  }
-  const key = uriStr ?? doc.uri.toString();
-  const dir =
-    scratchDirs.get(key) ??
-    vscode.workspace.getWorkspaceFolder(doc.uri)?.uri.fsPath ??
-    vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
-    path.dirname(doc.uri.fsPath);
-
-  output.show(true);
-  output.appendLine(`\n$ allx eval  (classes: ${dir})`);
-  const child = execFile(
-    cliPath(),
-    ["eval", "--stdin", "--dir", dir],
-    { env: execEnv(), timeout: 60000, maxBuffer: 8 * 1024 * 1024 },
-    (err, stdout, stderr) => {
-      if (stdout) {
-        output.append(stdout);
-      }
-      if (stderr) {
-        output.append(stderr);
-      }
-      if (err && !stdout && !stderr) {
-        output.appendLine(String(err));
-      }
-    }
-  );
-  child.stdin?.end(doc.getText());
-}
-
-/** Puts a single "▶ Run" lens at the top of the scratch buffers we created. */
-class ScratchCodeLensProvider implements vscode.CodeLensProvider {
-  onDidChangeCodeLenses = scratchLenses.event;
-  provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
-    if (!scratchDirs.has(document.uri.toString())) {
-      return [];
-    }
-    return [
-      new vscode.CodeLens(new vscode.Range(0, 0, 0, 0), {
-        title: "▶ Run (AlloyX)",
-        command: "alloyx.runScratch",
-        arguments: [document.uri.toString()],
-      }),
-    ];
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Activation.
 // ---------------------------------------------------------------------------
 export function activate(context: vscode.ExtensionContext): void {
@@ -404,26 +359,27 @@ export function activate(context: vscode.ExtensionContext): void {
     diagnostics,
     output,
     vscode.languages.registerCodeLensProvider(selector, new ApexCodeLensProvider()),
-    // "▶ Run" on top of scratch buffers (untitled apex docs we created)
+    // "▶ Run" on top of run-buffers (untitled apex docs we created)
     vscode.languages.registerCodeLensProvider(
       { scheme: "untitled", language: "apex" },
-      new ScratchCodeLensProvider()
+      new RunBufferCodeLensProvider()
     ),
+    // the one run path, reached from the CodeLens (with the method) ...
     vscode.commands.registerCommand(
       "alloyx.runMethod",
-      (file: string, klass: string, method: string, params?: OutlineParam[]) =>
-        runMethod(file, klass, method, params)
+      (file: string, klass: string, method: OutlineMethod) => runMethod(file, klass, method)
     ),
-    // right-click in a .cls -> run the method under the cursor
+    // ... and from the right-click menu (method under the cursor) ...
     vscode.commands.registerCommand("alloyx.runMethodAtCursor", () => runMethodAtCursor()),
-    vscode.commands.registerCommand("alloyx.runScratch", (uri?: string) => runScratch(uri)),
+    // ... and the ▶ Run at the top of a run-buffer.
+    vscode.commands.registerCommand("alloyx.runBuffer", (uri?: string) => runBuffer(uri)),
     // on-type (debounced), and immediate on save / open
     vscode.workspace.onDidChangeTextDocument((e) => schedule(e.document)),
     vscode.workspace.onDidSaveTextDocument((doc) => void refreshDiagnostics(doc, diagnostics)),
     vscode.workspace.onDidOpenTextDocument((doc) => void refreshDiagnostics(doc, diagnostics)),
     vscode.workspace.onDidCloseTextDocument((doc) => {
       diagnostics.delete(doc.uri);
-      scratchDirs.delete(doc.uri.toString()); // don't leak closed scratch buffers
+      runBuffers.delete(doc.uri.toString()); // don't leak closed run-buffers
     })
   );
 
@@ -434,5 +390,5 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 export function deactivate(): void {
-  // Nothing to clean up — the terminal is disposed by VSCode on exit.
+  // Nothing to clean up — VSCode disposes the output channel on exit.
 }

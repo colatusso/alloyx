@@ -4,7 +4,7 @@ Runs your Salesforce **Apex** locally and flags **type errors as you type** —
 both powered by the `allx` CLI. The extension itself doesn't parse Apex; it
 shells out to `allx` for everything.
 
-- **Run** — a `▶ Run` / `▶ Test` CodeLens above each method runs it via `allx run`.
+- **Run** — a `▶ Run` / `▶ Test` CodeLens above each method (or right-click) runs it locally.
 - **Type-check** — on every edit (debounced) it calls `allx check` and underlines
   type errors inline: a `String` assigned to an `Integer` field, a field or method
   that doesn't exist, basic syntax slips — the org's own compile errors, on your
@@ -17,23 +17,22 @@ shells out to `allx` for everything.
 
 ## Run a method
 
-Both ways run locally (JVM, milliseconds — the org is only touched if your code
-does SOQL/DML):
+Click **▶ Run** above the method (or right-click → **AlloyX: Run Method**) — same
+thing either way. Results show in the **AlloyX** output panel. It runs locally on
+the JVM in milliseconds; the org is only touched if your code does SOQL/DML.
 
-- **CodeLens** — click `▶ Run` / `▶ Test` above the method.
-- **Right-click → AlloyX: Run Method** — runs the method under the cursor.
-  - **No parameters** → it just runs.
-  - **Has parameters** → it opens a **scratch buffer** with the call pre-written,
-    one typed placeholder per argument (no guessed defaults):
+- **No parameters** → it runs straight away.
+- **Has parameters** → it opens the call pre-written, one typed placeholder per
+  argument (no guessed defaults — static methods call `Class.m(...)`, instance
+  methods `new Class().m(...)`):
 
-    ```apex
-    // AlloyX scratch — fill in the arguments, then ▶ Run (above). Runs locally.
-    System.debug(MyClass.process(/* Account acct */, /* Integer qty */));
-    ```
+  ```apex
+  // Run MyClass.process — fill in the arguments, then ▶ Run (above). Runs locally.
+  System.debug(new MyClass().process(/* Account acct */, /* Integer qty */));
+  ```
 
-    Fill in the values — it's a full anonymous block, so you can `new Account(...)`,
-    `insert`, query, whatever — then hit **▶ Run** at the top. It executes via
-    `allx eval` on the local JVM.
+  Fill in the values — it's a full Apex block, so you can `new Account(...)`,
+  `insert`, query, whatever — then hit **▶ Run** at the top.
 
 ## How to install
 

@@ -30,8 +30,8 @@
         "title": "AlloyX: Run Method"
       },
       {
-        "command": "alloyx.runScratch",
-        "title": "AlloyX: Run Anonymous Apex"
+        "command": "alloyx.runBuffer",
+        "title": "AlloyX: Run"
       }
     ],
     "menus": {
@@ -40,6 +40,16 @@
           "command": "alloyx.runMethodAtCursor",
           "when": "resourceExtname == .cls",
           "group": "navigation@1"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "alloyx.runMethod",
+          "when": "false"
+        },
+        {
+          "command": "alloyx.runBuffer",
+          "when": "false"
         }
       ]
     },
