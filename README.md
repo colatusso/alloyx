@@ -34,9 +34,9 @@ AlloyX runs **your actual Apex** — no rewrite, no porting to JS. You decide **
 ## What you get
 
 - ⚡ **Instant dev loop** — save → run in **ms**, just the class you changed. Real Java breakpoints. Offline for pure logic.
+- 🔎 **Catch type errors before you deploy** *(coming soon)* — assign a `String` to an `Integer` field, call a field or method that doesn't exist, and see it flagged **as you type in VS Code** — the org's own compile errors, on your machine in milliseconds instead of minutes after a deploy.
 - 🪶 **Less impact** — no burned deploys or API calls, no polluting the org just to try something.
 - ✅ **Local validation before deploy** *(coming soon)* — run your `@isTest` tests locally, in ms, before you push. CI / pre-commit with no org.
-- 🔎 **Type errors as you type** *(coming soon)* — a `String` assigned to an `Integer` field, an unknown field or method, flagged **inline in VS Code** as you edit — the org's own compile errors, on your machine in milliseconds, not after a deploy.
 - 🚀 **Batch / ETL without governor limits** — runs on your machine's CPU/RAM, not the platform's.
 - 🔌 **Real data when you need it** — SOQL/DML run against your org's REST API, authenticated with the token from the `sf` CLI; pure logic stays local, only the data crosses the line.
 
