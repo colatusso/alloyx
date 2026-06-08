@@ -36,6 +36,7 @@ AlloyX runs **your actual Apex** — no rewrite, no porting to JS. You decide **
 - ⚡ **Instant dev loop** — save → run in **ms**, just the class you changed. Real Java breakpoints. Offline for pure logic.
 - 🪶 **Less impact** — no burned deploys or API calls, no polluting the org just to try something.
 - ✅ **Local validation before deploy** *(coming soon)* — run your `@isTest` tests locally, in ms, before you push. CI / pre-commit with no org.
+- 🔎 **Type errors as you type** *(coming soon)* — a `String` assigned to an `Integer` field, an unknown field or method, flagged **inline in VS Code** as you edit — the org's own compile errors, on your machine in milliseconds, not after a deploy.
 - 🚀 **Batch / ETL without governor limits** — runs on your machine's CPU/RAM, not the platform's.
 - 🔌 **Real data when you need it** — SOQL/DML run against your org's REST API, authenticated with the token from the `sf` CLI; pure logic stays local, only the data crosses the line.
 
@@ -107,9 +108,9 @@ Point at an org once with `alloyx.json` in your project (instead of `--org` ever
 
 ## Status
 
-Early but working: classes & methods, control flow (`if`/`while`/`for`/`for-each`/ternary), OO (fields, constructors, instance methods, inheritance), **exceptions** (`try`/`catch`/`finally`/`throw`), collections (`List`/`Set`/`Map`) and `Decimal`/`Date`/`Datetime`, **SOQL/DML/sObjects against a real org**, **typed sObject field access** — with describe-backed validation that catches a `String` put in a `Number` field or a field that doesn't exist (cached via `schema sync`, then offline) — plus an `@isTest` runner.
+Early but working: classes & methods (incl. **inner classes**, **interfaces**, **enums**), control flow (`if`/`while`/`for`/`for-each`/ternary), OO (fields, constructors, instance methods, inheritance), **exceptions** (`try`/`catch`/`finally`/`throw`), collections (`List`/`Set`/`Map`) and `Decimal`/`Date`/`Datetime`, **SOQL/DML/sObjects against a real org**, **typed sObject field access** — with describe-backed validation that catches a `String` put in a `Number` field or a field that doesn't exist (cached via `schema sync`, then offline) — plus an `@isTest` runner.
 
-Coming: enums, broader built-in coverage, and the full **pre-deploy validation** flow — run your `@isTest` suite locally before you push.
+Coming: broader built-in coverage, the **inline type-check in VS Code** (errors flagged as you type), and the full **pre-deploy validation** flow — run your `@isTest` suite locally before you push.
 
 ## What AlloyX is *not*
 
