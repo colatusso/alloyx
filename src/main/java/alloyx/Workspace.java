@@ -177,7 +177,26 @@ final class Workspace {
             return List.of(path);
         }
         try (Stream<Path> s = Files.walk(path)) {
-            return s.filter(p -> p.toString().endsWith(".cls")).sorted().toList();
+            return s.filter(p -> p.toString().endsWith(".cls"))
+                .filter(p -> !underHiddenDir(path, p))
+                .sorted().toList();
         }
+    }
+
+    /**
+     * True if {@code file} lives under a hidden (dot-prefixed) directory below the
+     * scan root. Skips tooling/VCS trees — {@code .git}, {@code .apexcache}, and
+     * crucially {@code .sfdx/.../StandardApexLibrary}, whose stubs (e.g. an
+     * {@code enum LoggingLevel}) are not user Apex and collide with the runtime.
+     * A root that is itself hidden is honoured; only segments below it are pruned.
+     */
+    private static boolean underHiddenDir(Path root, Path file) {
+        Path rel = root.relativize(file);
+        for (int i = 0; i < rel.getNameCount() - 1; i++) {
+            if (rel.getName(i).toString().startsWith(".")) {
+                return true;
+            }
+        }
+        return false;
     }
 }
