@@ -171,7 +171,9 @@ public final class Cli {
         }
         connectOrg(org, target); // schema (typed sObjects) via org or synced cache; offline otherwise
         java.util.List<Workspace.Diag> diags = Workspace.check(target);
-        java.lang.System.out.println(new com.google.gson.Gson().toJson(diags));
+        // disableHtmlEscaping so generics read as <String>, not <String>
+        java.lang.System.out.println(
+            new com.google.gson.GsonBuilder().disableHtmlEscaping().create().toJson(diags));
     }
 
     private static void connectOrg(String cliOrg, Path start) {
