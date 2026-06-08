@@ -13,9 +13,27 @@ shells out to `allx` for everything.
 ## What you see
 
 - `▶ Run` above every `static` method, `▶ Test` above every `@isTest` method.
-  Methods that are neither get no lens. Click a lens to run it; if the method
-  has parameters you're prompted for space-separated values.
 - Red squiggles under type errors as you type, with the message in Apex terms.
+
+## Run a method
+
+Both ways run locally (JVM, milliseconds — the org is only touched if your code
+does SOQL/DML):
+
+- **CodeLens** — click `▶ Run` / `▶ Test` above the method.
+- **Right-click → AlloyX: Run Method** — runs the method under the cursor.
+  - **No parameters** → it just runs.
+  - **Has parameters** → it opens a **scratch buffer** with the call pre-written,
+    one typed placeholder per argument (no guessed defaults):
+
+    ```apex
+    // AlloyX scratch — fill in the arguments, then ▶ Run (above). Runs locally.
+    System.debug(MyClass.process(/* Account acct */, /* Integer qty */));
+    ```
+
+    Fill in the values — it's a full anonymous block, so you can `new Account(...)`,
+    `insert`, query, whatever — then hit **▶ Run** at the top. It executes via
+    `allx eval` on the local JVM.
 
 ## How to install
 

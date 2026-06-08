@@ -43,6 +43,15 @@ final class Workspace {
     }
 
     static Compiled compile(List<Path> clsFiles) throws Exception {
+        return compile(clsFiles, List.of());
+    }
+
+    /**
+     * Compile the given .cls files together with extra in-memory classes (e.g. an
+     * anonymous-block wrapper for `allx eval`, which has no file on disk). The extra
+     * decls compile and load exactly like the file-backed ones.
+     */
+    static Compiled compile(List<Path> clsFiles, List<ClassDecl> extraDecls) throws Exception {
         List<ClassDecl> decls = new ArrayList<>();
         for (Path f : clsFiles) {
             try {
@@ -51,6 +60,7 @@ final class Workspace {
                 throw new RuntimeException(f.getFileName() + ": " + e.getMessage(), e);
             }
         }
+        decls.addAll(extraDecls);
         Set<String> userClasses = new HashSet<>();
         for (ClassDecl d : decls) {
             userClasses.add(d.name());
@@ -123,6 +133,42 @@ final class Workspace {
         LinkedHashMap<String, Path> closure = new LinkedHashMap<>();
         Deque<String> queue = new ArrayDeque<>();
         queue.add(start);
+        while (!queue.isEmpty()) {
+            String name = queue.poll();
+            Path f = index.get(name);
+            if (f == null || closure.containsKey(name)) {
+                continue;
+            }
+            closure.put(name, f);
+            for (Lexer.Token t : Lexer.tokenize(Files.readString(f))) {
+                if (t.kind().equals("IDENT") && index.containsKey(t.value())) {
+                    queue.add(t.value());
+                }
+            }
+        }
+        return new ArrayList<>(closure.values());
+    }
+
+    /**
+     * Like {@link #resolveDeps}, but seeded from an arbitrary Apex snippet (an
+     * anonymous block) instead of a file: the snippet isn't a sibling class, so we
+     * scan its tokens for workspace class names and take the transitive closure of
+     * those. {@code dir} is the folder whose .cls the snippet may call.
+     */
+    static List<Path> resolveDepsForSource(String source, Path dir) throws IOException {
+        Map<String, Path> index = new HashMap<>();
+        if (dir != null && Files.isDirectory(dir)) {
+            for (Path p : clsAt(dir)) {
+                index.put(classNameOf(p), p);
+            }
+        }
+        LinkedHashMap<String, Path> closure = new LinkedHashMap<>();
+        Deque<String> queue = new ArrayDeque<>();
+        for (Lexer.Token t : Lexer.tokenize(source)) {
+            if (t.kind().equals("IDENT") && index.containsKey(t.value())) {
+                queue.add(t.value());
+            }
+        }
         while (!queue.isEmpty()) {
             String name = queue.poll();
             Path f = index.get(name);

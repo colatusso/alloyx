@@ -1,6 +1,8 @@
 .vscode/**
 src/**
 node_modules/**
+.apexcache/**
+*.vsix
 **/tsconfig.json
 **/*.map
 **/*.ts

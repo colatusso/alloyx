@@ -1,7 +1,7 @@
 {
   "name": "alloyx-vscode",
   "displayName": "AlloyX",
-  "description": "Run Salesforce Apex methods locally via the allx CLI, straight from CodeLens in .cls files.",
+  "description": "Run Salesforce Apex locally and catch type errors as you type — powered by the allx CLI.",
   "version": "0.0.1",
   "publisher": "alloyx",
   "repository": {
@@ -24,8 +24,25 @@
       {
         "command": "alloyx.runMethod",
         "title": "AlloyX: Run Apex Method"
+      },
+      {
+        "command": "alloyx.runMethodAtCursor",
+        "title": "AlloyX: Run Method"
+      },
+      {
+        "command": "alloyx.runScratch",
+        "title": "AlloyX: Run Anonymous Apex"
       }
     ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "alloyx.runMethodAtCursor",
+          "when": "resourceExtname == .cls",
+          "group": "navigation@1"
+        }
+      ]
+    },
     "configuration": {
       "title": "AlloyX",
       "properties": {

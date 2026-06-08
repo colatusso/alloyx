@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import * as path from "path";
 import { execFile } from "child_process";
 
 // ---------------------------------------------------------------------------
@@ -244,6 +245,129 @@ async function refreshDiagnostics(
 }
 
 // ---------------------------------------------------------------------------
+// Anonymous Apex ("scratch") run. Right-clicking a method runs it; when the
+// method takes parameters there's nothing sensible to type into a dialog for an
+// sObject or a List, so instead we open a scratch buffer with the call already
+// written out (one typed placeholder per argument). The dev fills the values and
+// runs the buffer as an anonymous block via `allx eval` — locally, on the JVM.
+// ---------------------------------------------------------------------------
+const output = vscode.window.createOutputChannel("AlloyX");
+
+// scratch buffers we created -> the classes dir their snippet resolves against,
+// so `allx eval --dir` can find the called class and its dependencies.
+const scratchDirs = new Map<string, string>();
+const scratchLenses = new vscode.EventEmitter<void>();
+
+/**
+ * A ready-to-run call for a method. Arguments are left as `/* Type name *\/`
+ * placeholders — never a guessed default — so the dev sees exactly what each
+ * slot expects, and `allx check` flags the empty slots until they're filled.
+ */
+function buildCallStub(klass: string, m: OutlineMethod): string {
+  const args = (m.params ?? []).map((p) => `/* ${p.type} ${p.name} */`).join(", ");
+  const call = `${klass}.${m.name}(${args})`;
+  // wrap a returning method in System.debug so its result prints
+  return m.returnType && m.returnType !== "void" ? `System.debug(${call});` : `${call};`;
+}
+
+/** Open a scratch buffer pre-filled with the call; the dev fills args and runs it. */
+async function openScratch(file: string, klass: string, m: OutlineMethod): Promise<void> {
+  const header =
+    "// AlloyX scratch — fill in the arguments, then ▶ Run (above). Runs locally.";
+  const content = `${header}\n${buildCallStub(klass, m)}\n`;
+  const doc = await vscode.workspace.openTextDocument({ language: "apex", content });
+  scratchDirs.set(doc.uri.toString(), path.dirname(file));
+  scratchLenses.fire(); // make the "▶ Run" lens show up on the fresh buffer
+  await vscode.window.showTextDocument(doc);
+}
+
+/** The method whose signature line is nearest at/above the given (1-based) line. */
+function methodAtLine(outline: Outline, line1: number): OutlineMethod | undefined {
+  let best: OutlineMethod | undefined;
+  for (const m of outline.methods) {
+    if (m.line <= line1 && (!best || m.line > best.line)) {
+      best = m;
+    }
+  }
+  return best;
+}
+
+/** Right-click handler: run the method under the cursor (scratch if it has params). */
+async function runMethodAtCursor(): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || !editor.document.uri.fsPath.endsWith(".cls")) {
+    return;
+  }
+  const file = editor.document.uri.fsPath;
+  const outline = await getOutline(file);
+  if (!outline) {
+    vscode.window.showWarningMessage("AlloyX: couldn't parse this file.");
+    return;
+  }
+  const m = methodAtLine(outline, editor.selection.active.line + 1);
+  if (!m) {
+    vscode.window.showWarningMessage("AlloyX: put the cursor inside a method to run it.");
+    return;
+  }
+  if (!m.params || m.params.length === 0) {
+    await runMethod(file, outline.class, m.name, m.params); // no args -> run straight away
+  } else {
+    await openScratch(file, outline.class, m);
+  }
+}
+
+/** Run the active scratch buffer as anonymous Apex (`allx eval --stdin`). */
+function runScratch(uriStr?: string): void {
+  const doc = vscode.window.activeTextEditor?.document;
+  if (!doc) {
+    return;
+  }
+  const key = uriStr ?? doc.uri.toString();
+  const dir =
+    scratchDirs.get(key) ??
+    vscode.workspace.getWorkspaceFolder(doc.uri)?.uri.fsPath ??
+    vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
+    path.dirname(doc.uri.fsPath);
+
+  output.show(true);
+  output.appendLine(`\n$ allx eval  (classes: ${dir})`);
+  const child = execFile(
+    cliPath(),
+    ["eval", "--stdin", "--dir", dir],
+    { env: execEnv(), timeout: 60000, maxBuffer: 8 * 1024 * 1024 },
+    (err, stdout, stderr) => {
+      if (stdout) {
+        output.append(stdout);
+      }
+      if (stderr) {
+        output.append(stderr);
+      }
+      if (err && !stdout && !stderr) {
+        output.appendLine(String(err));
+      }
+    }
+  );
+  child.stdin?.end(doc.getText());
+}
+
+/** Puts a single "▶ Run" lens at the top of the scratch buffers we created. */
+class ScratchCodeLensProvider implements vscode.CodeLensProvider {
+  onDidChangeCodeLenses = scratchLenses.event;
+  provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
+    if (!scratchDirs.has(document.uri.toString())) {
+      return [];
+    }
+    return [
+      new vscode.CodeLens(new vscode.Range(0, 0, 0, 0), {
+        title: "▶ Run (AlloyX)",
+        command: "alloyx.runScratch",
+        arguments: [document.uri.toString()],
+      }),
+    ];
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Activation.
 // ---------------------------------------------------------------------------
 export function activate(context: vscode.ExtensionContext): void {
@@ -278,17 +402,29 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     diagnostics,
+    output,
     vscode.languages.registerCodeLensProvider(selector, new ApexCodeLensProvider()),
+    // "▶ Run" on top of scratch buffers (untitled apex docs we created)
+    vscode.languages.registerCodeLensProvider(
+      { scheme: "untitled", language: "apex" },
+      new ScratchCodeLensProvider()
+    ),
     vscode.commands.registerCommand(
       "alloyx.runMethod",
       (file: string, klass: string, method: string, params?: OutlineParam[]) =>
         runMethod(file, klass, method, params)
     ),
+    // right-click in a .cls -> run the method under the cursor
+    vscode.commands.registerCommand("alloyx.runMethodAtCursor", () => runMethodAtCursor()),
+    vscode.commands.registerCommand("alloyx.runScratch", (uri?: string) => runScratch(uri)),
     // on-type (debounced), and immediate on save / open
     vscode.workspace.onDidChangeTextDocument((e) => schedule(e.document)),
     vscode.workspace.onDidSaveTextDocument((doc) => void refreshDiagnostics(doc, diagnostics)),
     vscode.workspace.onDidOpenTextDocument((doc) => void refreshDiagnostics(doc, diagnostics)),
-    vscode.workspace.onDidCloseTextDocument((doc) => diagnostics.delete(doc.uri))
+    vscode.workspace.onDidCloseTextDocument((doc) => {
+      diagnostics.delete(doc.uri);
+      scratchDirs.delete(doc.uri.toString()); // don't leak closed scratch buffers
+    })
   );
 
   // check whatever is already open at activation time

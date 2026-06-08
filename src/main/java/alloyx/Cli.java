@@ -16,6 +16,7 @@ public final class Cli {
         String cmd = args.length > 0 ? args[0] : "";
         switch (cmd) {
             case "run" -> run(args);
+            case "eval" -> eval(args);
             case "check" -> check(args);
             case "test" -> test(args);
             case "transpile" -> {
@@ -27,6 +28,7 @@ public final class Cli {
             default -> {
                 java.lang.System.err.println(
                     "usage: allx (run <File.cls> --method Class.method [--args v1 v2 ...] "
+                        + "| eval (<File>|--stdin) [--dir <classesDir>] "
                         + "| test <path> | transpile <File.cls> | outline <File.cls>) [--org alias]");
                 java.lang.System.exit(2);
             }
@@ -224,6 +226,71 @@ public final class Cli {
         Object result = m.invoke(receiver, coerceArgs(m.getParameterTypes(), callArgs));
         if (m.getReturnType() != void.class) {
             java.lang.System.out.println("=> " + result);
+        }
+    }
+
+    /**
+     * `allx eval (<File>|--stdin) [--dir <classesDir>] [--org alias]`: run an
+     * anonymous Apex block locally. The snippet is wrapped in a throwaway class,
+     * compiled together with the workspace classes it references (resolved from
+     * --dir), and executed on the JVM — System.debug prints to stdout. This is a
+     * local Execute Anonymous: the editor uses it to invoke a method with the
+     * arguments the developer fills in, but it runs any Apex statements.
+     */
+    private static void eval(String[] args) throws Exception {
+        String org = null;
+        Path dir = Path.of(".");
+        boolean stdin = false;
+        String file = null;
+        for (int i = 1; i < args.length; i++) {
+            switch (args[i]) {
+                case "--org" -> org = args[++i];
+                case "--dir" -> dir = Path.of(args[++i]);
+                case "--stdin" -> stdin = true;
+                default -> {
+                    if (!args[i].startsWith("--") && file == null) {
+                        file = args[i];
+                    }
+                }
+            }
+        }
+        String snippet = stdin
+            ? new String(java.lang.System.in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8)
+            : (file != null ? Files.readString(Path.of(file)) : "");
+        if (snippet.isBlank()) {
+            java.lang.System.err.println("eval: nothing to run (pass a file or --stdin)");
+            java.lang.System.exit(2);
+            return;
+        }
+        connectOrg(org, dir);
+
+        // Wrap the block in a static method of a throwaway class, then compile and
+        // invoke it like any other workspace class. The name is unlikely to collide;
+        // if a real class shared it, both would compile and javac would flag it.
+        String scratchClass = "AlloyxScratch";
+        String wrapped = "public class " + scratchClass + " {\n"
+            + "  public static void run() {\n"
+            + snippet + "\n"
+            + "  }\n}\n";
+        ClassDecl scratch;
+        try {
+            scratch = Parser.parse(wrapped);
+        } catch (RuntimeException syntaxError) {
+            java.lang.System.err.println("eval: " + syntaxError.getMessage());
+            java.lang.System.exit(1);
+            return;
+        }
+
+        List<Path> deps = Workspace.resolveDepsForSource(snippet, dir.toAbsolutePath());
+        Workspace.Compiled compiled = Workspace.compile(deps, List.of(scratch));
+        try {
+            compiled.load(scratchClass).getMethod("run").invoke(null);
+        } catch (InvocationTargetException ite) {
+            // surface the Apex-level exception, not the reflection wrapper
+            Throwable cause = ite.getCause() != null ? ite.getCause() : ite;
+            java.lang.System.out.println(cause.getClass().getSimpleName()
+                + (cause.getMessage() != null ? ": " + cause.getMessage() : ""));
+            java.lang.System.exit(1);
         }
     }
 
