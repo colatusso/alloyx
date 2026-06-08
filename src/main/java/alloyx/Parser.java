@@ -19,6 +19,8 @@ final class Parser {
     private final List<Token> toks;
     private final String src;
     private int i = 0;
+    // statement -> originating Apex line, for the source map (used by `allx check`)
+    private final java.util.Map<Stmt, Integer> stmtLines = new java.util.IdentityHashMap<>();
 
     private Parser(List<Token> toks, String src) {
         this.toks = toks;
@@ -27,6 +29,16 @@ final class Parser {
 
     static ClassDecl parse(String src) {
         return new Parser(Lexer.tokenize(src), src).parseClass();
+    }
+
+    // parse plus the statement->Apex-line map, so a javac error on the generated
+    // Java can be reported against the right line of the original .cls
+    record Parsed(ClassDecl cls, java.util.Map<Stmt, Integer> stmtLines) {}
+
+    static Parsed parseWithLines(String src) {
+        Parser p = new Parser(Lexer.tokenize(src), src);
+        ClassDecl cls = p.parseClass();
+        return new Parsed(cls, p.stmtLines);
     }
 
     private Token peek() {
@@ -315,6 +327,13 @@ final class Parser {
     }
 
     private Stmt parseStmt() {
+        int line = lineNum(peek().start());
+        Stmt s = parseStmtInner();
+        stmtLines.put(s, line); // remember where this statement came from in the .cls
+        return s;
+    }
+
+    private Stmt parseStmtInner() {
         String kw = peek().value();
         if (kw.equals("{")) return new GuardedBlock(null, parseBlock());
         if (kw.equals("return")) {

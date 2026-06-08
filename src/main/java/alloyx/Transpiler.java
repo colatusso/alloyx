@@ -16,7 +16,12 @@ import java.util.Set;
  * equality ({@code ==}) to {@code Objects.equals} (Java {@code ==} is reference).
  */
 final class Transpiler {
-    record Result(String className, String source) {}
+    // lineMap: generated-Java line -> originating Apex line (empty unless built for `check`)
+    record Result(String className, String source, java.util.Map<Integer, Integer> lineMap) {
+        Result(String className, String source) {
+            this(className, source, java.util.Map.of());
+        }
+    }
 
     private static final String IMPORTS = String.join("\n",
         "import alloyx.runtime.System;",
@@ -87,6 +92,10 @@ final class Transpiler {
     // inner (nested) class names — both simple (Inner) and qualified (Outer.Inner) —
     // so references resolve as a user type, never the fallback dynamic SObject
     private final Set<String> innerTypes = new java.util.HashSet<>();
+    // source map inputs/outputs: stmt->Apex line (from the parser) and the
+    // generated-Java line -> Apex line accumulated while emitting
+    private java.util.Map<Stmt, Integer> stmtLines = java.util.Map.of();
+    private final java.util.Map<Integer, Integer> lineMap = new java.util.TreeMap<>();
 
     private Transpiler(Set<String> userClasses, SchemaProvider schema, Set<String> typedSObjects) {
         this.userClasses = userClasses;
@@ -148,6 +157,15 @@ final class Transpiler {
         return new Transpiler(userClasses, schema, typedSObjects).emitClass(cls);
     }
 
+    // Same as transpile, but builds the source map (generated-Java line -> Apex line)
+    // from the parser's statement lines. Used by `allx check`.
+    static Result transpileWithLines(ClassDecl cls, Set<String> userClasses, SchemaProvider schema,
+                                     Set<String> typedSObjects, java.util.Map<Stmt, Integer> stmtLines) {
+        Transpiler t = new Transpiler(userClasses, schema, typedSObjects);
+        t.stmtLines = stmtLines;
+        return t.emitClass(cls);
+    }
+
     private Result emitClass(ClassDecl cls) {
         registerInnerTypes(cls);
         StringBuilder sb = new StringBuilder();
@@ -157,7 +175,7 @@ final class Transpiler {
         sb.append("@SuppressWarnings(\"unchecked\")\n");
         sb.append("public ");
         emitClassBody(cls, java.util.Map.of(), "", sb);
-        return new Result(cls.name(), sb.toString());
+        return new Result(cls.name(), sb.toString(), lineMap);
     }
 
     // The `extends`/`implements` clause. A class extends its superclass and implements its
@@ -283,6 +301,12 @@ final class Transpiler {
 
     // --- statements
     private void emitStmt(Stmt s, String indent, StringBuilder sb) {
+        // source map: the upcoming Java line maps back to this statement's Apex line
+        Integer apexLine = stmtLines.get(s);
+        if (apexLine != null) {
+            int javaLine = countNewlines(sb) + 1;
+            lineMap.putIfAbsent(javaLine, apexLine);
+        }
         switch (s) {
             case VarDecl v -> {
                 locals.put(v.name(), v.type());
@@ -834,6 +858,14 @@ final class Transpiler {
     private static String base(String type) {
         int lt = type.indexOf('<');
         return (lt >= 0 ? type.substring(0, lt) : type).replace("[]", "");
+    }
+
+    private static int countNewlines(CharSequence s) {
+        int n = 0;
+        for (int k = 0; k < s.length(); k++) {
+            if (s.charAt(k) == '\n') n++;
+        }
+        return n;
     }
 
     private static String escape(String s) {

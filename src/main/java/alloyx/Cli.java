@@ -16,6 +16,7 @@ public final class Cli {
         String cmd = args.length > 0 ? args[0] : "";
         switch (cmd) {
             case "run" -> run(args);
+            case "check" -> check(args);
             case "test" -> test(args);
             case "transpile" -> {
                 String source = Files.readString(Path.of(args[1]));
@@ -153,6 +154,24 @@ public final class Cli {
         }
         root.put("methods", methods);
         java.lang.System.out.println(new com.google.gson.Gson().toJson(root));
+    }
+
+    /**
+     * `allx check <File.cls> [--org alias]`: type-check a single class for editor
+     * feedback and print the diagnostics as JSON (one array of {severity,line,column,
+     * message}, in .cls coordinates). The VS Code extension consumes this.
+     */
+    private static void check(String[] args) throws Exception {
+        Path target = Path.of(args[1]);
+        String org = null;
+        for (int i = 2; i < args.length; i++) {
+            if (args[i].equals("--org")) {
+                org = args[++i];
+            }
+        }
+        connectOrg(org, target); // schema (typed sObjects) via org or synced cache; offline otherwise
+        java.util.List<Workspace.Diag> diags = Workspace.check(target);
+        java.lang.System.out.println(new com.google.gson.Gson().toJson(diags));
     }
 
     private static void connectOrg(String cliOrg, Path start) {
