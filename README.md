@@ -107,9 +107,9 @@ Point at an org once with `alloyx.json` in your project (instead of `--org` ever
 
 ## Status
 
-Early but working: classes & methods, control flow (`if`/`while`/`for-each`), OO (fields, constructors, instance methods), collections (`List`/`Set`/`Map`), and **SOQL/DML/sObjects against a real org**, plus an `@isTest` runner.
+Early but working: classes & methods, control flow (`if`/`while`/`for`/`for-each`/ternary), OO (fields, constructors, instance methods, inheritance), **exceptions** (`try`/`catch`/`finally`/`throw`), collections (`List`/`Set`/`Map`) and `Decimal`/`Date`/`Datetime`, **SOQL/DML/sObjects against a real org**, **typed sObject field access** — with describe-backed validation that catches a `String` put in a `Number` field or a field that doesn't exist (cached via `schema sync`, then offline) — plus an `@isTest` runner.
 
-Coming: exceptions, enums, `Decimal`, broader built-in coverage, and the **pre-deploy validation** flow.
+Coming: enums, broader built-in coverage, and the full **pre-deploy validation** flow — run your `@isTest` suite locally before you push.
 
 ## What AlloyX is *not*
 
