@@ -36,13 +36,24 @@ final class Transpiler {
         "import alloyx.runtime.Strings;",
         "import alloyx.runtime.Type;",
         "import alloyx.runtime.SObjectType;",
-        "import alloyx.runtime.DescribeSObjectResult;");
+        "import alloyx.runtime.DescribeSObjectResult;",
+        "import alloyx.runtime.Pattern;",
+        "import alloyx.runtime.Matcher;",
+        "import alloyx.runtime.LoggingLevel;",
+        "import alloyx.runtime.Limits;");
 
     private static final Set<String> JAVA_SAME =
         Set.of("Integer", "Long", "Boolean", "String", "Object", "Double", "void");
     private static final Set<String> COLLECTIONS = Set.of("List", "Set", "Map");
     // Apex Schema namespace types backed by runtime classes (not dynamic sObjects)
     private static final Set<String> SCHEMA_TYPES = Set.of("SObjectType", "DescribeSObjectResult");
+    // native Apex System types backed by runtime classes (not dynamic sObjects)
+    private static final Set<String> RUNTIME_TYPES = Set.of("Pattern", "Matcher", "LoggingLevel", "Limits");
+    // String instance methods Java's String lacks (or returns a different type for):
+    // routed to the Strings helper as Strings.method(theString, ...)
+    private static final Set<String> APEX_STRING_METHODS = Set.of(
+        "split", "countMatches", "substringAfter", "substringBefore", "substringBetween",
+        "removeStart", "removeEnd");
 
     // Apex is case-insensitive; map a lowercased built-in name to its canonical form
     // so `decimal`/`Date.ValueOf`/`system.debug` resolve to the right Java symbol.
@@ -319,6 +330,10 @@ final class Transpiler {
                 .append('(').append(emitExpr(d.value())).append(");\n");
             case Throw th -> sb.append(indent).append("throw ")
                 .append(emitExpr(th.value())).append(";\n");
+            case Group grp -> {
+                // multi-declaration: emit each at the same indent, no new scope
+                for (Stmt st : grp.stmts()) emitStmt(st, indent, sb);
+            }
             case GuardedBlock g -> {
                 // guard (e.g. System.runAs(u)) has no local equivalent — run the body in a plain block
                 sb.append(indent).append("{\n");
@@ -443,6 +458,12 @@ final class Transpiler {
                     ? "assertTrue" : lowerFirst(name);
                 return type + "." + method + "(" + emitArgs(mc.args()) + ")";
             }
+        }
+        // Apex String instance methods Java lacks -> Strings.method(theString, args)
+        if (APEX_STRING_METHODS.contains(name) && isString(mc.target())) {
+            String args = emitArgs(mc.args());
+            return "Strings." + name + "(" + emitExpr(mc.target())
+                + (args.isEmpty() ? "" : ", " + args) + ")";
         }
         return emitExpr(mc.target()) + "." + name + "(" + emitArgs(mc.args()) + ")";
     }
@@ -627,6 +648,7 @@ final class Transpiler {
         if (canon != null) base = canon; // case-fold built-in type names (decimal -> Decimal)
         if (base.startsWith("Schema.")) base = base.substring("Schema.".length());
         if (SCHEMA_TYPES.contains(base)) return base; // Schema.SObjectType -> runtime SObjectType
+        if (RUNTIME_TYPES.contains(base)) return base; // Pattern / Matcher / LoggingLevel / Limits
         if (JAVA_SAME.contains(base)) return base;
         if (base.equals("Decimal") || base.equals("Date")
             || base.equals("Datetime") || base.equals("Time")) return base; // runtime types

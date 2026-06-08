@@ -22,4 +22,9 @@ public class ApexException extends RuntimeException {
     public String getStackTraceString() {
         return "";
     }
+
+    /** Apex {@code Exception.getLineNumber()}: no Apex line table locally, so 0. */
+    public Integer getLineNumber() {
+        return 0;
+    }
 }

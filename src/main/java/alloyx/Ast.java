@@ -21,7 +21,11 @@ record MethodDecl(String name, boolean isStatic, String returnType,
 }
 
 // --- statements
-sealed interface Stmt permits VarDecl, Assign, ExprStmt, Return, If, While, ForEach, For, Dml, Try, Throw, GuardedBlock {}
+sealed interface Stmt permits VarDecl, Assign, ExprStmt, Return, If, While, ForEach, For, Dml, Try, Throw, GuardedBlock, Group {}
+
+// several statements emitted inline, sharing the enclosing scope (no braces) —
+// e.g. a multi-variable declaration: Integer a = 1, b, c = 3;
+record Group(List<Stmt> stmts) implements Stmt {}
 
 record VarDecl(String type, String name, Expr init) implements Stmt {}
 

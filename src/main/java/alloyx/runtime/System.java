@@ -16,6 +16,21 @@ public class System {
         java.lang.System.out.println("DEBUG|" + value);
     }
 
+    /** Apex {@code System.debug(LoggingLevel, Object)}: the level is advisory locally. */
+    public static void debug(Object level, Object value) {
+        java.lang.System.out.println("DEBUG|" + value);
+    }
+
+    /** Apex {@code System.now()}: current date-time. */
+    public static Datetime now() {
+        return Datetime.now();
+    }
+
+    /** Apex {@code System.today()}: current date. */
+    public static Date today() {
+        return Date.today();
+    }
+
     public static void assertTrue(boolean condition) {
         if (!condition) {
             throw new AssertException("Assertion Failed");

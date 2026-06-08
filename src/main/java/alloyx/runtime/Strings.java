@@ -156,4 +156,90 @@ public class Strings {
         }
         return s.replace("'", "\\'");
     }
+
+    // --- instance-style methods the transpiler routes here (Java's String lacks them,
+    //     or they return a different type). Called as Strings.x(theString, ...).
+
+    /** Apex {@code String.split(regex)} -> List<String> (Java's returns a String[]). */
+    public static List<String> split(String s, String regex) {
+        List<String> out = new List<>();
+        if (s != null) {
+            for (String part : s.split(regex)) {
+                out.add(part);
+            }
+        }
+        return out;
+    }
+
+    /** Apex {@code String.split(regex, limit)}. */
+    public static List<String> split(String s, String regex, Integer limit) {
+        List<String> out = new List<>();
+        if (s != null) {
+            for (String part : s.split(regex, limit)) {
+                out.add(part);
+            }
+        }
+        return out;
+    }
+
+    /** Apex {@code String.countMatches(sub)}: number of non-overlapping occurrences. */
+    public static Integer countMatches(String s, String sub) {
+        if (s == null || sub == null || sub.isEmpty()) {
+            return 0;
+        }
+        int count = 0;
+        int idx = 0;
+        while ((idx = s.indexOf(sub, idx)) != -1) {
+            count++;
+            idx += sub.length();
+        }
+        return count;
+    }
+
+    /** Apex {@code String.substringAfter(sep)}: text after the first {@code sep} (or ""). */
+    public static String substringAfter(String s, String sep) {
+        if (s == null) {
+            return null;
+        }
+        int i = s.indexOf(sep);
+        return i < 0 ? "" : s.substring(i + sep.length());
+    }
+
+    /** Apex {@code String.substringBefore(sep)}: text before the first {@code sep} (or the whole string). */
+    public static String substringBefore(String s, String sep) {
+        if (s == null) {
+            return null;
+        }
+        int i = s.indexOf(sep);
+        return i < 0 ? s : s.substring(0, i);
+    }
+
+    /** Apex {@code String.substringBetween(open, close)}. */
+    public static String substringBetween(String s, String open, String close) {
+        if (s == null) {
+            return null;
+        }
+        int start = s.indexOf(open);
+        if (start < 0) {
+            return null;
+        }
+        int end = s.indexOf(close, start + open.length());
+        return end < 0 ? null : s.substring(start + open.length(), end);
+    }
+
+    /** Apex {@code String.removeStart(prefix)}. */
+    public static String removeStart(String s, String prefix) {
+        return (s != null && prefix != null && s.startsWith(prefix)) ? s.substring(prefix.length()) : s;
+    }
+
+    /** Apex {@code String.removeEnd(suffix)}. */
+    public static String removeEnd(String s, String suffix) {
+        return (s != null && suffix != null && s.endsWith(suffix))
+            ? s.substring(0, s.length() - suffix.length()) : s;
+    }
+
+    /** {@code String.isBlank} accepting an Object (e.g. a Map&lt;String,Object&gt;.get result). */
+    public static Boolean isBlank(Object o) {
+        return o == null || isBlank(String.valueOf(o));
+    }
 }

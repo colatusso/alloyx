@@ -122,6 +122,7 @@ final class SObjectScan {
                 walkExpr(g.guard(), out);
                 walkBody(g.body(), out);
             }
+            case Group grp -> walkBody(grp.stmts(), out);
         }
     }
 

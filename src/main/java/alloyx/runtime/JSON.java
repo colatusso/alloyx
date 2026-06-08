@@ -74,6 +74,15 @@ public final class JSON {
         return GSON_PRETTY.toJson(o);
     }
 
+    /** Apex overloads with the suppress-Apex-object-nulls flag (Gson already omits them). */
+    public static String serialize(Object o, Boolean suppressApexObjectNulls) {
+        return serialize(o);
+    }
+
+    public static String serializePretty(Object o, Boolean suppressApexObjectNulls) {
+        return serializePretty(o);
+    }
+
     // ------------------------------------------------------------------
     // Deserialization
     // ------------------------------------------------------------------

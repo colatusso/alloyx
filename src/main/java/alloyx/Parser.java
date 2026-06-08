@@ -160,7 +160,9 @@ final class Parser {
             Object member = parseMember(name);
             if (member == null) continue; // tolerated inner type / static{} block
             if (member instanceof Field f) fields.add(f);
-            else methods.add((MethodDecl) member);
+            else if (member instanceof List<?> group) {
+                for (Object g : group) fields.add((Field) g); // several fields on one line
+            } else methods.add((MethodDecl) member);
         }
         expect("}");
         return new ClassDecl(name, methods, fields, superclass);
@@ -217,11 +219,22 @@ final class Parser {
             // auto-property modelled as a plain field (get/set body, if any, is dropped)
             return new Field(parts.get(parts.size() - 2), name, null, isStatic);
         }
-        // field
-        Expr init = accept("=") ? parseExpr() : null;
-        expect(";");
+        // field — Apex allows several on one line: Type a = x, b, c = z;
         String fieldType = parts.size() >= 2 ? parts.get(parts.size() - 2) : "Object";
-        return new Field(fieldType, name, init, isStatic);
+        Expr init = accept("=") ? parseExpr() : null;
+        if (!at(",")) {
+            expect(";");
+            return new Field(fieldType, name, init, isStatic);
+        }
+        List<Field> group = new ArrayList<>();
+        group.add(new Field(fieldType, name, init, isStatic));
+        while (accept(",")) {
+            String fname = advance().value(); // next field shares the type
+            Expr finit = accept("=") ? parseExpr() : null;
+            group.add(new Field(fieldType, fname, finit, isStatic));
+        }
+        expect(";");
+        return group;
     }
 
     private void skipBalancedBraces() {
@@ -318,7 +331,17 @@ final class Parser {
         if (type != null && isIdent()) {
             String name = advance().value();
             Expr init = accept("=") ? parseExpr() : null;
-            if (accept(";")) return new VarDecl(type, name, init);
+            // Apex allows several locals on one line: Type a = 1, b, c = 3;
+            List<Stmt> decls = new ArrayList<>();
+            decls.add(new VarDecl(type, name, init));
+            while (accept(",")) {
+                String n = advance().value();
+                Expr ini = accept("=") ? parseExpr() : null;
+                decls.add(new VarDecl(type, n, ini));
+            }
+            if (accept(";")) {
+                return decls.size() == 1 ? decls.get(0) : new Group(decls);
+            }
         }
         i = save;
         return null;
