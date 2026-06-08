@@ -531,7 +531,7 @@ final class Transpiler {
 
     // Apex identifiers are case-insensitive; Java's aren't. Resolve a referenced name to
     // the exact spelling of the matching declared field/param/local so a use that differs
-    // only in case (stacktrace vs stackTrace) still binds. Unknown names pass through.
+    // only in case (username vs userName) still binds. Unknown names pass through.
     private String canonicalName(String ident) {
         if (ident.equals("this") || locals.containsKey(ident)) {
             return ident;

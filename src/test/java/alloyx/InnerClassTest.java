@@ -73,18 +73,18 @@ class InnerClassTest {
 
     @Test
     void caseInsensitiveFieldReferenceBinds() throws Exception {
-        // declared `stackTrace`, used `stacktrace` — Apex treats them as one symbol
-        Path p = probe("Trace", """
-            public class Trace {
-                public static List<String> stackTrace = new List<String>();
+        // declared `userName`, used `username` — Apex treats them as one symbol
+        Path p = probe("Names", """
+            public class Names {
+                public static List<String> userName = new List<String>();
                 public static Integer go() {
-                    stacktrace.add('a');
-                    stackTrace.add('b');
-                    return stackTrace.size();
+                    username.add('a');
+                    userName.add('b');
+                    return userName.size();
                 }
             }
             """);
-        Class<?> c = Workspace.compile(List.of(p)).load("Trace");
+        Class<?> c = Workspace.compile(List.of(p)).load("Names");
         assertEquals(Integer.valueOf(2), c.getMethod("go").invoke(null));
     }
 
