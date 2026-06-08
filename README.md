@@ -22,6 +22,14 @@ Apex is **cloud-bound** — it only runs inside the org. So every change is a ro
 
 **AlloyX gives that loop back to your machine.** Your real Apex runs on a local JVM in **milliseconds** — edit → run → **set a real breakpoint** → repeat, offline, no deploy. SOQL/DML reach the org only when you actually need real data. Step-through debugging from your editor arrives with the **VS Code extension** *(in development)*.
 
+## What you get
+
+- ⚡ **Instant dev loop** — save → run in **ms**, just the class you changed. Real Java breakpoints. Offline for pure logic.
+- 🔎 **Catch type errors before you deploy** *(coming soon)* — assign a `String` to an `Integer` field, call a field or method that doesn't exist, and see it flagged **as you type in VS Code** — the org's own compile errors, on your machine in milliseconds instead of minutes after a deploy.
+- 🪶 **Less impact** — no burned deploys or API calls, no polluting the org just to try something.
+- 🚀 **Batch / ETL without governor limits** — runs on your machine's CPU/RAM, not the platform's.
+- 🔌 **Real data when you need it** — SOQL/DML run against your org's REST API, authenticated with the token from the `sf` CLI; pure logic stays local, only the data crosses the line.
+
 ## The idea — freedom of choice
 
 AlloyX runs **your actual Apex** — no rewrite, no porting to JS. You decide **where** your logic runs:
@@ -30,14 +38,6 @@ AlloyX runs **your actual Apex** — no rewrite, no porting to JS. You decide **
 - **locally** for dev, batch and ETL
 
 …from a **single source of truth**. One class, one bug fix, runs in both places.
-
-## What you get
-
-- ⚡ **Instant dev loop** — save → run in **ms**, just the class you changed. Real Java breakpoints. Offline for pure logic.
-- 🔎 **Catch type errors before you deploy** *(coming soon)* — assign a `String` to an `Integer` field, call a field or method that doesn't exist, and see it flagged **as you type in VS Code** — the org's own compile errors, on your machine in milliseconds instead of minutes after a deploy.
-- 🪶 **Less impact** — no burned deploys or API calls, no polluting the org just to try something.
-- 🚀 **Batch / ETL without governor limits** — runs on your machine's CPU/RAM, not the platform's.
-- 🔌 **Real data when you need it** — SOQL/DML run against your org's REST API, authenticated with the token from the `sf` CLI; pure logic stays local, only the data crosses the line.
 
 ## How it works
 
