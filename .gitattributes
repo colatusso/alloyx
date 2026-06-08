@@ -1,0 +1,12 @@
+# Normalize line endings to LF across platforms
+* text=auto eol=lf
+
+# Windows batch scripts need CRLF
+*.bat text eol=crlf
+
+# Binary artifacts
+*.jar binary
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary

@@ -1,0 +1,15 @@
+# build output
+build/
+.gradle/
+.apexcache/
+
+# local config (org alias) & scratch — never canonical
+alloyx.json
+playground/
+
+# IDE / class files
+.idea/
+*.class
+
+# vscode-extension (isolated Node project — not published yet)
+vscode-extension/
