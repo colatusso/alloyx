@@ -240,9 +240,25 @@ final class Workspace {
             }
             int apexLine = mapLine(map, (int) d.getLineNumber());
             out.add(new Diag(d.getKind().toString(), apexLine, (int) d.getColumnNumber(),
-                msg.replace('\n', ' ').trim()));
+                apexify(msg)));
         }
         return out;
+    }
+
+    // Rewrite a javac message in Apex terms: the runtime/Java type names the dev never
+    // wrote (java.lang.String -> String, int -> Integer, BigDecimal -> Decimal, the
+    // alloyx.runtime.* wrappers -> their bare names). Pure string cleanup, no semantics.
+    private static String apexify(String msg) {
+        return msg.replace('\n', ' ')
+            .replaceAll("\\s+", " ")
+            .replace("java.math.BigDecimal", "Decimal")
+            .replaceAll("\\bjava\\.lang\\.", "")
+            .replaceAll("\\balloyx\\.runtime\\.", "")
+            .replaceAll("\\bint\\b", "Integer")
+            .replaceAll("\\bboolean\\b", "Boolean")
+            .replaceAll("\\bdouble\\b", "Double")
+            .replaceAll("\\blong\\b", "Long")
+            .trim();
     }
 
     // a parser error reads "... (line N)"; surface it as a syntax diagnostic on that line
