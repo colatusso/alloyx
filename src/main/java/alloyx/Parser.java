@@ -137,43 +137,69 @@ final class Parser {
         return anns;
     }
 
-    // --- class
+    // --- class / interface / enum
     private ClassDecl parseClass() {
         parseAnnotations();
-        while (isIdent() && !at("class")) {
+        while (isIdent() && !at("class") && !at("interface") && !at("enum")) {
             advance(); // skip modifiers
         }
-        expect("class");
+        String kind = at("interface") ? "interface" : at("enum") ? "enum" : "class";
+        advance(); // consume the class | interface | enum keyword
         String name = advance().value();
+        if (kind.equals("enum")) {
+            return parseEnumBody(name);
+        }
         String superclass = null;
+        List<String> interfaces = new ArrayList<>();
         if (accept("extends")) {
             superclass = consumeType();
+            while (accept(",")) interfaces.add(base(consumeType())); // interface extends J, K
         }
         if (accept("implements")) {
-            consumeType();
-            while (accept(",")) consumeType();
+            interfaces.add(base(consumeType()));
+            while (accept(",")) interfaces.add(base(consumeType()));
         }
-        return parseClassBody(name, superclass);
+        return parseClassBody(name, superclass, interfaces, kind);
     }
 
-    // Parse a class body from the opening '{' onward. Shared by the top-level class
-    // and inner classes (which reach here already past their `class Name extends ...`).
-    private ClassDecl parseClassBody(String name, String superclass) {
+    // An Apex enum is a flat list of constant names: enum E { A, B, C }
+    private ClassDecl parseEnumBody(String name) {
+        expect("{");
+        List<String> values = new ArrayList<>();
+        while (!at("}") && !peek().kind().equals("EOF")) {
+            String v = advance().value();
+            if (!v.equals(",")) values.add(v);
+        }
+        expect("}");
+        return new ClassDecl(name, List.of(), List.of(), null, List.of(),
+            List.of(), "enum", values);
+    }
+
+    // Parse a class/interface body from the opening '{' onward. Shared by the top-level
+    // type and inner types (which arrive here past their `class Name extends ...`).
+    private ClassDecl parseClassBody(String name, String superclass,
+                                     List<String> interfaces, String kind) {
         expect("{");
         List<MethodDecl> methods = new ArrayList<>();
         List<Field> fields = new ArrayList<>();
         List<ClassDecl> inners = new ArrayList<>();
         while (!at("}")) {
             Object member = parseMember(name);
-            if (member == null) continue; // tolerated inner interface/enum / static{} block
+            if (member == null) continue; // tolerated static{} block
             if (member instanceof Field f) fields.add(f);
-            else if (member instanceof ClassDecl inner) inners.add(inner); // nested class
+            else if (member instanceof ClassDecl inner) inners.add(inner); // nested type
             else if (member instanceof List<?> group) {
                 for (Object g : group) fields.add((Field) g); // several fields on one line
             } else methods.add((MethodDecl) member);
         }
         expect("}");
-        return new ClassDecl(name, methods, fields, superclass, inners);
+        return new ClassDecl(name, methods, fields, superclass, inners, interfaces, kind, List.of());
+    }
+
+    // strip any generic suffix: List<String> -> List
+    private static String base(String type) {
+        int lt = type.indexOf('<');
+        return lt >= 0 ? type.substring(0, lt) : type;
     }
 
     private Object parseMember(String className) {
@@ -216,21 +242,24 @@ final class Parser {
             return new MethodDecl(name, isStatic, returnType, params, body, anns, lineNum(memberStart));
         }
         if (at("{")) {
-            // a real inner class is parsed (not discarded): the cursor is at its body's
-            // '{', and the name/superclass were captured among `parts` (... class Name
-            // [extends Super] [implements ...]). Interfaces/enums stay tolerated for now.
-            if (parts.contains("class")) {
-                String innerName = parts.get(parts.indexOf("class") + 1);
+            // a nested type is parsed (not discarded): the cursor is at its body's '{', and
+            // the keyword/name were captured among `parts` (... class|interface Name [extends
+            // Super] [implements ...]). An inner enum reads its constant list separately.
+            if (parts.contains("enum")) {
+                return parseEnumBody(parts.get(parts.indexOf("enum") + 1));
+            }
+            if (parts.contains("class") || parts.contains("interface")) {
+                String kw = parts.contains("interface") ? "interface" : "class";
+                String innerName = parts.get(parts.indexOf(kw) + 1);
                 String sup = parts.contains("extends")
                     ? parts.get(parts.indexOf("extends") + 1) : null;
-                return parseClassBody(innerName, sup);
+                return parseClassBody(innerName, sup, new ArrayList<>(), kw);
             }
-            // property (Type name { get; set; }) or static{}/inner interface|enum block
-            boolean isTypeMember = parts.contains("interface") || parts.contains("enum");
+            // property (Type name { get; set; }) or a static{} initializer block
             skipBalancedBraces();
             accept(";"); // tolerate a trailing ';'
-            if (isTypeMember || parts.size() < 2) {
-                return null; // inner interface/enum or static initializer — not emitted
+            if (parts.size() < 2) {
+                return null; // static initializer — not emitted
             }
             // auto-property modelled as a plain field (get/set body, if any, is dropped)
             return new Field(parts.get(parts.size() - 2), name, null, isStatic);
@@ -575,16 +604,23 @@ final class Parser {
 
     private Expr parsePostfix() {
         Expr expr = parsePrimary();
-        while (at("[") || at(".")) {
+        while (at("[") || at(".") || (at("?") && peek(1).value().equals("."))) {
             if (accept("[")) {
                 Expr index = parseExpr();
                 expect("]");
                 expr = new Index(expr, index);
             } else {
+                boolean safe = accept("?"); // Apex safe navigation: a?.b
                 advance(); // '.'
                 String member = advance().value();
-                expr = at("(") ? new MethodCall(expr, member, parseArgs()) : new Prop(expr, member);
+                expr = at("(")
+                    ? new MethodCall(expr, member, parseArgs(), safe)
+                    : new Prop(expr, member, safe);
             }
+        }
+        // trailing post-increment/decrement as an expression: i++, list.get(0)--
+        if (at("++") || at("--")) {
+            expr = new Postfix(expr, advance().value());
         }
         return expr;
     }
@@ -653,6 +689,13 @@ final class Parser {
     private Expr parseNew() {
         expect("new");
         String type = consumeType();
+        if (at("[")) {
+            // new T[n] -> a List<T> sized to n (Apex pre-fills with nulls)
+            advance();
+            Expr size = parseExpr();
+            expect("]");
+            return new ArrayNew(type, size);
+        }
         if (at("{")) {
             return parseCollectionLiteral(type);
         }

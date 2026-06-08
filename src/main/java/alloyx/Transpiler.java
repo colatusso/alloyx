@@ -160,6 +160,25 @@ final class Transpiler {
         return new Result(cls.name(), sb.toString());
     }
 
+    // The `extends`/`implements` clause. A class extends its superclass and implements its
+    // interfaces; a Java interface extends them all (Apex `interface I extends J` maps straight).
+    private String emitTypeRelations(ClassDecl cls, boolean iface) {
+        java.util.List<String> ext = new java.util.ArrayList<>();
+        if (cls.superclass() != null) ext.add(mapType(cls.superclass()));
+        if (iface) {
+            for (String i : cls.interfaces()) ext.add(mapType(i));
+            return ext.isEmpty() ? "" : " extends " + String.join(", ", ext);
+        }
+        StringBuilder s = new StringBuilder();
+        if (!ext.isEmpty()) s.append(" extends ").append(String.join(", ", ext));
+        if (!cls.interfaces().isEmpty()) {
+            java.util.List<String> impl = new java.util.ArrayList<>();
+            for (String i : cls.interfaces()) impl.add(mapType(i));
+            s.append(" implements ").append(String.join(", ", impl));
+        }
+        return s.toString();
+    }
+
     // Record every inner class under both its simple and Outer.Inner name (Apex nests
     // only one level), so mapType resolves them to a real user type, not an sObject.
     private void registerInnerTypes(ClassDecl cls) {
@@ -175,14 +194,20 @@ final class Transpiler {
     // the outer statics — Apex inner classes carry no outer instance).
     private void emitClassBody(ClassDecl cls, java.util.Map<String, String> outerStatics,
                                String indent, StringBuilder sb) {
+        // an enum is a flat constant list: emit and return (no fields/methods/inners)
+        if (cls.kind().equals("enum")) {
+            sb.append("enum ").append(cls.name()).append(" { ")
+              .append(String.join(", ", cls.enumValues())).append(" }\n");
+            return;
+        }
+        boolean iface = cls.kind().equals("interface");
+
         java.util.Map<String, String> myFields = new java.util.LinkedHashMap<>(outerStatics);
         for (Field f : cls.fields()) myFields.put(f.name(), f.type());
         this.fieldTypes = myFields;
 
-        sb.append("class ").append(cls.name());
-        if (cls.superclass() != null) {
-            sb.append(" extends ").append(mapType(cls.superclass()));
-        }
+        sb.append(iface ? "interface " : "class ").append(cls.name());
+        sb.append(emitTypeRelations(cls, iface));
         sb.append(" {\n");
         String member = indent + "    ";
         String stmt = member + "    ";
@@ -200,7 +225,7 @@ final class Transpiler {
         boolean isException = cls.superclass() != null
             && (cls.superclass().equals("Exception") || cls.superclass().endsWith("Exception"));
         boolean hasCtor = cls.methods().stream().anyMatch(m -> m.name().equals(cls.name()));
-        if (isException && !hasCtor) {
+        if (!iface && isException && !hasCtor) {
             sb.append('\n');
             sb.append(member).append("public ").append(cls.name()).append("() { super(); }\n");
             sb.append(member).append("public ").append(cls.name())
@@ -213,6 +238,18 @@ final class Transpiler {
         for (MethodDecl m : cls.methods()) {
             if (!sigs.add(javaSig(m))) continue;
             sb.append('\n');
+            if (iface) {
+                // interface method: signature only (implicitly public abstract, no body)
+                sb.append(member).append(mapType(m.returnType())).append(' ')
+                  .append(m.name()).append('(');
+                for (int i = 0; i < m.params().size(); i++) {
+                    if (i > 0) sb.append(", ");
+                    Param p = m.params().get(i);
+                    sb.append(mapType(p.type())).append(' ').append(p.name());
+                }
+                sb.append(");\n");
+                continue;
+            }
             boolean isCtor = m.name().equals(cls.name());
             locals.clear();
             locals.putAll(fieldTypes);
@@ -430,11 +467,15 @@ final class Transpiler {
             case Unary u -> u.op().equals("++") || u.op().equals("--")
                 ? u.op() + emitExpr(u.operand())
                 : "(" + u.op() + emitExpr(u.operand()) + ")";
+            case Postfix p -> emitExpr(p.operand()) + p.op();
             case Binary b -> emitBinary(b);
             case Ternary t -> "(" + emitExpr(t.cond()) + " ? " + emitExpr(t.then())
                 + " : " + emitExpr(t.els()) + ")";
             case Call c -> mapCallee(c.callee()) + "(" + emitArgs(c.args()) + ")";
             case New nw -> emitNew(nw);
+            case ArrayNew a -> "new " + mapType("List<" + a.elementType() + ">")
+                + "(java.util.Arrays.asList(new " + mapType(a.elementType())
+                + "[" + emitExpr(a.size()) + "]))";
             case SObjectLit so -> emitSObject(so);
             case Soql q -> emitSoql(q);
             case Index ix -> emitExpr(ix.target()) + ".get(" + emitExpr(ix.index()) + ")";
@@ -482,6 +523,14 @@ final class Transpiler {
                 return runtimeEnum + "." + p.name().toUpperCase(java.util.Locale.ROOT);
             }
         }
+        String access = fieldAccess(p);
+        if (p.safe()) { // Apex a?.b -> (a == null ? null : a.b)
+            return "(" + emitExpr(p.target()) + " == null ? null : " + access + ")";
+        }
+        return access;
+    }
+
+    private String fieldAccess(Prop p) {
         String parent = sObjectTypeOf(p.target());
         if (parent == null) {
             return emitExpr(p.target()) + "." + p.name(); // regular Java field/member
@@ -496,6 +545,14 @@ final class Transpiler {
     }
 
     private String emitMethodCall(MethodCall mc) {
+        String call = methodCall(mc);
+        if (mc.safe()) { // Apex a?.m() -> (a == null ? null : a.m())
+            return "(" + emitExpr(mc.target()) + " == null ? null : " + call + ")";
+        }
+        return call;
+    }
+
+    private String methodCall(MethodCall mc) {
         String name = mc.name();
         // built-in static call (Apex is case-insensitive): canonicalize the type name
         // and lower-case the method's first char so Date.ValueOf -> Date.valueOf, etc.

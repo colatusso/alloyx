@@ -7,11 +7,19 @@ import java.util.List;
 // prototype); the front-end could later be swapped for ANTLR without touching it.
 
 // --- declarations
-// `inners` are nested type declarations (Apex inner classes); empty for a flat class.
+// A type declaration. `kind` is "class", "interface" or "enum". `inners` are nested
+// types; `interfaces` the implemented/extended interface names; `enumValues` the
+// constants (only for an enum). Defaults keep plain-class construction unchanged.
 record ClassDecl(String name, List<MethodDecl> methods, List<Field> fields,
-                 String superclass, List<ClassDecl> inners) {
+                 String superclass, List<ClassDecl> inners, List<String> interfaces,
+                 String kind, List<String> enumValues) {
     ClassDecl(String name, List<MethodDecl> methods, List<Field> fields, String superclass) {
-        this(name, methods, fields, superclass, List.of());
+        this(name, methods, fields, superclass, List.of(), List.of(), "class", List.of());
+    }
+
+    ClassDecl(String name, List<MethodDecl> methods, List<Field> fields, String superclass,
+              List<ClassDecl> inners) {
+        this(name, methods, fields, superclass, inners, List.of(), "class", List.of());
     }
 }
 
@@ -64,8 +72,9 @@ record GuardedBlock(Expr guard, List<Stmt> body) implements Stmt {}
 
 // --- expressions
 sealed interface Expr
-    permits Num, DecimalLit, Str, Bool, Null, Name, Unary, Binary, Ternary, Call, New, SObjectLit,
-            Soql, Index, ListLit, MapLit, Prop, MethodCall, Cast, InstanceOf, ClassLit {}
+    permits Num, DecimalLit, Str, Bool, Null, Name, Unary, Postfix, Binary, Ternary, Call, New,
+            ArrayNew, SObjectLit, Soql, Index, ListLit, MapLit, Prop, MethodCall, Cast,
+            InstanceOf, ClassLit {}
 
 record Num(int value) implements Expr {}
 
@@ -82,6 +91,9 @@ record Name(String ident) implements Expr {}
 
 record Unary(String op, Expr operand) implements Expr {}
 
+// post-increment/decrement used as an expression: x++ in get(i++), arr[j++], etc.
+record Postfix(Expr operand, String op) implements Expr {}
+
 record Binary(String op, Expr left, Expr right) implements Expr {}
 
 record Ternary(Expr cond, Expr then, Expr els) implements Expr {}
@@ -89,6 +101,9 @@ record Ternary(Expr cond, Expr then, Expr els) implements Expr {}
 record Call(String callee, List<Expr> args) implements Expr {}
 
 record New(String type, List<Expr> args) implements Expr {}
+
+// Apex `new T[n]`: a List<T> pre-sized with n null elements
+record ArrayNew(String elementType, Expr size) implements Expr {}
 
 record SObjectLit(String type, List<FieldInit> fields) implements Expr {}
 
@@ -107,9 +122,18 @@ record MapLit(String type, List<Expr> keys, List<Expr> values) implements Expr {
 
 // member access (expr.name) and method call on an expression (expr.name(args)),
 // so chains like foo().bar().baz parse to the left as nested targets
-record Prop(Expr target, String name) implements Expr {}
+// `safe` marks Apex safe navigation: a?.b yields null instead of dereferencing null.
+record Prop(Expr target, String name, boolean safe) implements Expr {
+    Prop(Expr target, String name) {
+        this(target, name, false);
+    }
+}
 
-record MethodCall(Expr target, String name, List<Expr> args) implements Expr {}
+record MethodCall(Expr target, String name, List<Expr> args, boolean safe) implements Expr {
+    MethodCall(Expr target, String name, List<Expr> args) {
+        this(target, name, args, false);
+    }
+}
 
 record Cast(String type, Expr expr) implements Expr {}
 
