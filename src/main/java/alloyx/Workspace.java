@@ -181,7 +181,13 @@ final class Workspace {
      * validated for real.
      */
     static List<Diag> check(Path target) throws Exception {
-        String src = Files.readString(target);
+        return check(target, null);
+    }
+
+    // sourceOverride lets an editor check unsaved buffer contents (passed via stdin) while
+    // still using `target` for the class name and the workspace dir (for the known-class index).
+    static List<Diag> check(Path target, String sourceOverride) throws Exception {
+        String src = sourceOverride != null ? sourceOverride : Files.readString(target);
         Parser.Parsed parsed;
         try {
             parsed = Parser.parseWithLines(src);

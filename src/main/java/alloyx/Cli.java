@@ -164,14 +164,20 @@ public final class Cli {
     private static void check(String[] args) throws Exception {
         Path target = Path.of(args[1]);
         String org = null;
+        boolean stdin = false;
         for (int i = 2; i < args.length; i++) {
             if (args[i].equals("--org")) {
                 org = args[++i];
+            } else if (args[i].equals("--stdin")) {
+                stdin = true; // read the (unsaved) source from stdin, for live editor checks
             }
         }
         connectOrg(org, target); // schema (typed sObjects) via org or synced cache; offline otherwise
-        java.util.List<Workspace.Diag> diags = Workspace.check(target);
-        // disableHtmlEscaping so generics read as <String>, not <String>
+        String source = stdin
+            ? new String(java.lang.System.in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8)
+            : null;
+        java.util.List<Workspace.Diag> diags = Workspace.check(target, source);
+        // disableHtmlEscaping so generics read as <String>, not unicode escapes
         java.lang.System.out.println(
             new com.google.gson.GsonBuilder().disableHtmlEscaping().create().toJson(diags));
     }
