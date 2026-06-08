@@ -13,6 +13,3 @@ PLAN.md
 # IDE / class files
 .idea/
 *.class
-
-# vscode-extension (isolated Node project — not published yet)
-vscode-extension/

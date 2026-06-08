@@ -1,0 +1,15 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "npm: compile",
+      "type": "shell",
+      "command": "npm run compile",
+      "options": {
+        "shell": { "executable": "/bin/bash", "args": ["-l", "-c"] }
+      },
+      "problemMatcher": "$tsc",
+      "group": "build"
+    }
+  ]
+}

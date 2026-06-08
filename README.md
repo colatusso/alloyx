@@ -20,12 +20,12 @@ Apex is **cloud-bound** — it only runs inside the org. So every change is a ro
 - 🐢 **Mistakes surface late.** A wrong type or a misspelled field only shows up when the org compiles your deploy — minutes later, not as you type.
 - 🧱 **Heavy logic means leaving Apex.** Anything past the governor limits gets rewritten into another service or language (the road **Salesforce Functions** took — now discontinued): a second codebase that drifts from the original.
 
-**AlloyX gives that loop back to your machine.** Your real Apex runs on a local JVM in **milliseconds** — edit → run → **set a real breakpoint** → repeat, offline, no deploy. SOQL/DML reach the org only when you actually need real data. Step-through debugging from your editor arrives with the **VS Code extension** *(in development)*.
+**AlloyX gives that loop back to your machine.** Your real Apex runs on a local JVM in **milliseconds** — edit → run → **set a real breakpoint** → repeat, offline, no deploy. SOQL/DML reach the org only when you actually need real data. The **VS Code extension** already runs methods and flags type errors as you type; step-through debugging from the editor is in development.
 
 ## What you get
 
 - ⚡ **Instant dev loop** — save → run in **ms**, just the class you changed. Real Java breakpoints. Offline for pure logic.
-- 🔎 **Catch type errors before you deploy** *(coming soon)* — assign a `String` to an `Integer` field, call a field or method that doesn't exist, and see it flagged **as you type in VS Code** — the org's own compile errors, on your machine in milliseconds instead of minutes after a deploy.
+- 🔎 **Catch type errors before you deploy** — assign a `String` to an `Integer` field, call a field or method that doesn't exist, and see it flagged **as you type in VS Code** — the org's own compile errors, on your machine in milliseconds instead of minutes after a deploy.
 - 🪶 **Less impact** — no burned deploys or API calls, no polluting the org just to try something.
 - 🚀 **Batch / ETL without governor limits** — runs on your machine's CPU/RAM, not the platform's.
 - 🔌 **Real data when you need it** — SOQL/DML run against your org's REST API, authenticated with the token from the `sf` CLI; pure logic stays local, only the data crosses the line.
@@ -107,9 +107,9 @@ Point at an org once with `alloyx.json` in your project (instead of `--org` ever
 
 ## Status
 
-Early but working: classes & methods (incl. **inner classes**, **interfaces**, **enums**), control flow (`if`/`while`/`for`/`for-each`/ternary), OO (fields, constructors, instance methods, inheritance), **exceptions** (`try`/`catch`/`finally`/`throw`), collections (`List`/`Set`/`Map`) and `Decimal`/`Date`/`Datetime`, **SOQL/DML/sObjects against a real org**, **typed sObject field access** — with describe-backed validation that catches a `String` put in a `Number` field or a field that doesn't exist (cached via `schema sync`, then offline) — plus an `@isTest` runner.
+Early but working: classes & methods (incl. **inner classes**, **interfaces**, **enums**), control flow (`if`/`while`/`for`/`for-each`/ternary), OO (fields, constructors, instance methods, inheritance), **exceptions** (`try`/`catch`/`finally`/`throw`), collections (`List`/`Set`/`Map`) and `Decimal`/`Date`/`Datetime`, **SOQL/DML/sObjects against a real org**, **typed sObject field access** — with describe-backed validation that catches a `String` put in a `Number` field or a field that doesn't exist (cached via `schema sync`, then offline) — plus an `@isTest` runner and a **VS Code extension** that runs methods from a CodeLens and flags type errors inline as you type.
 
-Coming: broader built-in coverage, the **inline type-check in VS Code** (errors flagged as you type), and the full **pre-deploy validation** flow — run your `@isTest` suite locally before you push.
+Coming: broader built-in coverage, step-through debugging from the editor, and the full **pre-deploy validation** flow — run your `@isTest` suite locally before you push.
 
 ## What AlloyX is *not*
 

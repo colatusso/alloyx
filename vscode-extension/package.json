@@ -1,0 +1,63 @@
+{
+  "name": "alloyx-vscode",
+  "displayName": "AlloyX",
+  "description": "Run Salesforce Apex methods locally via the allx CLI, straight from CodeLens in .cls files.",
+  "version": "0.0.1",
+  "publisher": "alloyx",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/colatusso/alloyx.git"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onLanguage:apex",
+    "workspaceContains:**/*.cls"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "alloyx.runMethod",
+        "title": "AlloyX: Run Apex Method"
+      }
+    ],
+    "configuration": {
+      "title": "AlloyX",
+      "properties": {
+        "alloyx.cliPath": {
+          "type": "string",
+          "default": "allx",
+          "description": "Path to the allx CLI binary. Defaults to 'allx' (resolved via PATH)."
+        },
+        "alloyx.checkDelayMs": {
+          "type": "number",
+          "default": 1500,
+          "description": "Idle time (ms) after typing stops before re-checking a .cls for errors."
+        },
+        "alloyx.javaHome": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the JDK (JAVA_HOME) used to run allx. Needed when VS Code is launched from the GUI and can't see your shell's JAVA_HOME. Example: /Users/you/.jdks/jdk-21.0.11+10/Contents/Home"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package --no-dependencies",
+    "reinstall": "vsce package --no-dependencies && code --install-extension alloyx-vscode-0.0.1.vsix --force"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.9.2",
+    "typescript": "^5.4.0"
+  }
+}
