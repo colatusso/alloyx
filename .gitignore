@@ -7,6 +7,9 @@ build/
 alloyx.json
 playground/
 
+# internal planning doc — kept local, not published
+PLAN.md
+
 # IDE / class files
 .idea/
 *.class
