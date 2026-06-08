@@ -10,7 +10,7 @@ final class Lexer {
     record Token(String kind, String value, int start) {}
 
     private static final String[] KINDS =
-        {"COMMENTLINE", "COMMENTBLOCK", "WS", "NUMBER", "STRING", "IDENT", "OP"};
+        {"COMMENTLINE", "COMMENTBLOCK", "WS", "NUMBER", "STRING", "DQUOTE", "IDENT", "OP"};
 
     private static final Pattern MASTER = Pattern.compile(String.join("|",
         "(?<COMMENTLINE>//[^\\n]*)",
@@ -20,6 +20,10 @@ final class Lexer {
         // unrolled loop ('[^'\]*(?:\.[^'\]*)*') — NOT '(?:[^'\]|\.)*', whose
         // alternation-in-a-star recurses per char and stack-overflows on long literals
         "(?<STRING>'[^'\\\\]*(?:\\\\.[^'\\\\]*)*')",
+        // a bare " outside a single-quoted string — Apex has no double-quote literals;
+        // emit it as a token so the parser can flag it instead of silently dropping it
+        // (which would leave the inner text lexed as a number/identifier)
+        "(?<DQUOTE>\")",
         "(?<IDENT>[A-Za-z_]\\w*)",
         "(?<OP>=>|==|!=|<=|>=|&&|\\|\\||\\+\\+|--|\\+=|-=|\\*=|/=|[-+*/=<>!{}()\\[\\];,.@?:&|^~])"
     ), Pattern.DOTALL);

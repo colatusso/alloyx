@@ -646,6 +646,10 @@ final class Parser {
 
     private Expr parsePrimary() {
         Token t = peek();
+        if (t.kind().equals("DQUOTE")) {
+            throw new RuntimeException(
+                "Apex strings use single quotes ('), not double quotes (\") (" + lineOf(t) + ")");
+        }
         if (t.kind().equals("NUMBER")) {
             advance();
             return t.value().contains(".") ? new DecimalLit(t.value()) : new Num(Integer.parseInt(t.value()));
