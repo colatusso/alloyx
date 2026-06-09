@@ -115,11 +115,16 @@ final class Transpiler {
     // generated-Java line -> Apex line accumulated while emitting
     private java.util.Map<Stmt, Integer> stmtLines = java.util.Map.of();
     private final java.util.Map<Integer, Integer> lineMap = new java.util.TreeMap<>();
+    // class name -> (lowercase field -> canonical field), so a qualified field access
+    // resolves case-insensitively (Apex: incomingItem.Name == incomingItem.name)
+    private final java.util.Map<String, java.util.Map<String, String>> memberIndex;
 
-    private Transpiler(Set<String> userClasses, SchemaProvider schema, Set<String> typedSObjects) {
+    private Transpiler(Set<String> userClasses, SchemaProvider schema, Set<String> typedSObjects,
+                       java.util.Map<String, java.util.Map<String, String>> memberIndex) {
         this.userClasses = userClasses;
         this.schema = schema;
         this.typedSObjects = typedSObjects;
+        this.memberIndex = memberIndex;
     }
 
     private boolean isSObject(Expr e) {
@@ -180,14 +185,21 @@ final class Transpiler {
 
     static Result transpile(ClassDecl cls, Set<String> userClasses, SchemaProvider schema,
                             Set<String> typedSObjects) {
-        return new Transpiler(userClasses, schema, typedSObjects).emitClass(cls);
+        return transpile(cls, userClasses, schema, typedSObjects, java.util.Map.of());
+    }
+
+    static Result transpile(ClassDecl cls, Set<String> userClasses, SchemaProvider schema,
+                            Set<String> typedSObjects,
+                            java.util.Map<String, java.util.Map<String, String>> memberIndex) {
+        return new Transpiler(userClasses, schema, typedSObjects, memberIndex).emitClass(cls);
     }
 
     // Same as transpile, but builds the source map (generated-Java line -> Apex line)
     // from the parser's statement lines. Used by `allx check`.
     static Result transpileWithLines(ClassDecl cls, Set<String> userClasses, SchemaProvider schema,
-                                     Set<String> typedSObjects, java.util.Map<Stmt, Integer> stmtLines) {
-        Transpiler t = new Transpiler(userClasses, schema, typedSObjects);
+                                     Set<String> typedSObjects, java.util.Map<Stmt, Integer> stmtLines,
+                                     java.util.Map<String, java.util.Map<String, String>> memberIndex) {
+        Transpiler t = new Transpiler(userClasses, schema, typedSObjects, memberIndex);
         t.stmtLines = stmtLines;
         return t.emitClass(cls);
     }
@@ -602,7 +614,9 @@ final class Transpiler {
         }
         String parent = sObjectTypeOf(p.target());
         if (parent == null) {
-            return emitExpr(p.target()) + "." + p.name(); // regular Java field/member
+            // not an sObject — resolve the member case-insensitively against the target's
+            // declared class (Apex: incomingItem.Name == incomingItem.name)
+            return emitExpr(p.target()) + "." + canonicalMember(declaredTypeOf(p.target()), p.name());
         }
         if (isTyped(parent)) {
             // typed sObject: a.Name -> a.getName() (javac checks the field exists + its type)
@@ -611,6 +625,37 @@ final class Transpiler {
         String get = emitExpr(p.target()) + ".get(\"" + p.name() + "\")";
         String ft = schema.fieldType(parent, p.name());
         return ft != null ? "((" + mapType(ft) + ") " + get + ")" : get; // typed via describe, else Object
+    }
+
+    /** The declared (Apex) type of a target we can read cheaply: a local/param, or this.field. */
+    private String declaredTypeOf(Expr e) {
+        if (e instanceof Name n && !n.ident().equals("this")) {
+            String t = locals.get(n.ident());
+            if (t != null) {
+                return t;
+            }
+            // a bare known class name -> static member access (CCConstants.SOME_CONST)
+            if (memberIndex.containsKey(n.ident())) {
+                return n.ident();
+            }
+        }
+        if (e instanceof Prop pr && pr.target() instanceof Name tn && tn.ident().equals("this")) {
+            return locals.get(pr.name());
+        }
+        return null;
+    }
+
+    /** Resolve a field name case-insensitively against a known class's fields, else unchanged. */
+    private String canonicalMember(String declaredType, String member) {
+        if (declaredType == null) {
+            return member;
+        }
+        String b = base(declaredType);
+        java.util.Map<String, String> members = memberIndex.get(b);
+        if (members == null && b.contains(".")) {
+            members = memberIndex.get(b.substring(b.lastIndexOf('.') + 1)); // Outer.Inner -> Inner
+        }
+        return members == null ? member : members.getOrDefault(member.toLowerCase(java.util.Locale.ROOT), member);
     }
 
     private String emitMethodCall(MethodCall mc) {

@@ -101,4 +101,23 @@ class InnerClassTest {
         Class<?> c = Workspace.compile(List.of(p)).load("Log");
         c.getMethod("go").invoke(null); // no throw == compiled + ran
     }
+
+    @Test
+    void caseInsensitiveFieldAccessAcrossClasses() throws Exception {
+        // a field declared `name`/`code` accessed as `.Name`/`.Code` is the same symbol
+        // in Apex — on an instance (it.Name) and on a class (Wrap.Code, static)
+        Path p = probe("Wrap", """
+            public class Wrap {
+                public static String code = 'C1';
+                public class Item { public String name; }
+                public static String go() {
+                    Item it = new Item();
+                    it.Name = 'x';
+                    return it.NAME + Wrap.Code;
+                }
+            }
+            """);
+        Class<?> c = Workspace.compile(List.of(p)).load("Wrap");
+        assertEquals("xC1", c.getMethod("go").invoke(null));
+    }
 }

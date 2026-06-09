@@ -89,8 +89,9 @@ final class Workspace {
             Files.writeString(javaFile, src);
             javaFiles.add(javaFile.toString());
         }
+        Map<String, Map<String, String>> memberIdx = memberIndex(decls);
         for (ClassDecl d : decls) {
-            Transpiler.Result r = Transpiler.transpile(d, userClasses, schema, typedSObjects);
+            Transpiler.Result r = Transpiler.transpile(d, userClasses, schema, typedSObjects, memberIdx);
             Path javaFile = CACHE_DIR.resolve(d.name() + ".java");
             Files.writeString(javaFile, r.source());
             javaFiles.add(javaFile.toString());
@@ -111,6 +112,31 @@ final class Workspace {
         URLClassLoader loader = new URLClassLoader(
             new URL[]{CACHE_DIR.toUri().toURL()}, Workspace.class.getClassLoader());
         return new Compiled(loader, decls);
+    }
+
+    /**
+     * className -> (lowercase field -> canonical field), built from every class (and its
+     * inner classes) in the compile set. Lets the transpiler resolve a qualified field
+     * access case-insensitively, the way Apex does (incomingItem.Name == incomingItem.name).
+     */
+    static Map<String, Map<String, String>> memberIndex(List<ClassDecl> decls) {
+        Map<String, Map<String, String>> idx = new HashMap<>();
+        for (ClassDecl d : decls) {
+            indexFields(d, idx);
+        }
+        return idx;
+    }
+
+    private static void indexFields(ClassDecl d, Map<String, Map<String, String>> idx) {
+        Map<String, String> fields = idx.computeIfAbsent(d.name(), k -> new HashMap<>());
+        for (Field f : d.fields()) {
+            fields.putIfAbsent(f.name().toLowerCase(java.util.Locale.ROOT), f.name());
+        }
+        if (d.inners() != null) {
+            for (ClassDecl inner : d.inners()) {
+                indexFields(inner, idx); // indexed by its simple name (matched as Outer.Inner too)
+            }
+        }
     }
 
     /**
@@ -355,8 +381,9 @@ final class Workspace {
         }
         // target transpiled with a line map (to map its javac lines back to .cls);
         // direct deps transpiled plainly, only so their types/members resolve.
+        Map<String, Map<String, String>> memberIdx = memberIndex(decls);
         Transpiler.Result r = Transpiler.transpileWithLines(
-            cls, userClasses, schema, typedSObjects, parsed.stmtLines());
+            cls, userClasses, schema, typedSObjects, parsed.stmtLines(), memberIdx);
         Path targetJava = CACHE_DIR.resolve(cls.name() + ".java");
         Files.writeString(targetJava, r.source());
         javaFiles.add(targetJava.toString());
@@ -365,7 +392,7 @@ final class Workspace {
                 continue;
             }
             try {
-                String depSrc = Transpiler.transpile(d, userClasses, schema, typedSObjects).source();
+                String depSrc = Transpiler.transpile(d, userClasses, schema, typedSObjects, memberIdx).source();
                 Path jf = CACHE_DIR.resolve(d.name() + ".java");
                 Files.writeString(jf, depSrc);
                 javaFiles.add(jf.toString());
