@@ -1,28 +1,36 @@
 package alloyx.runtime;
 
-/** Apex {@code EncodingUtil} — recognized for type-checking; not executed locally yet. */
+import java.net.URLDecoder;
+import java.net.URLEncoder;
+import java.nio.charset.Charset;
+import java.util.Base64;
+import java.util.HexFormat;
+
+/** Apex {@code EncodingUtil} — base64 / hex / URL encoding, run for real via the JDK. */
 public final class EncodingUtil {
+    private EncodingUtil() {}
+
     public static Blob base64Decode(String value) {
-        throw Unsupported.notLocal("EncodingUtil.base64Decode");
+        return Blob.of(Base64.getDecoder().decode(value));
     }
 
     public static String base64Encode(Blob value) {
-        throw Unsupported.notLocal("EncodingUtil.base64Encode");
+        return Base64.getEncoder().encodeToString(value.bytes());
     }
 
     public static Blob convertFromHex(String input) {
-        throw Unsupported.notLocal("EncodingUtil.convertFromHex");
+        return Blob.of(HexFormat.of().parseHex(input));
     }
 
     public static String convertToHex(Blob value) {
-        throw Unsupported.notLocal("EncodingUtil.convertToHex");
+        return HexFormat.of().formatHex(value.bytes());
     }
 
     public static String urlDecode(String value, String encoding) {
-        throw Unsupported.notLocal("EncodingUtil.urlDecode");
+        return URLDecoder.decode(value, Charset.forName(encoding));
     }
 
     public static String urlEncode(String value, String encoding) {
-        throw Unsupported.notLocal("EncodingUtil.urlEncode");
+        return URLEncoder.encode(value, Charset.forName(encoding));
     }
 }

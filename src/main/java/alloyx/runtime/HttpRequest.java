@@ -1,67 +1,86 @@
 package alloyx.runtime;
 
-/** Apex {@code System.HttpRequest} — recognized for type-checking; callouts don't run locally yet. */
+import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
+
+/** Apex {@code System.HttpRequest} — holds the outbound request; sent for real by {@link Http}. */
 public final class HttpRequest {
+    private String endpoint;
+    private String method = "GET";
+    private String body = "";
+    private int timeoutMs = 0;
+    private boolean compressed = false;
+    private final LinkedHashMap<String, String> headers = new LinkedHashMap<>();
+
     public HttpRequest() {
     }
 
     public String getBody() {
-        throw Unsupported.notLocal("HttpRequest.getBody");
+        return body;
     }
 
     public Blob getBodyAsBlob() {
-        throw Unsupported.notLocal("HttpRequest.getBodyAsBlob");
+        return Blob.of(body == null ? new byte[0] : body.getBytes(StandardCharsets.UTF_8));
     }
 
     public Boolean getCompressed() {
-        throw Unsupported.notLocal("HttpRequest.getCompressed");
+        return compressed;
     }
 
     public String getEndpoint() {
-        throw Unsupported.notLocal("HttpRequest.getEndpoint");
+        return endpoint;
     }
 
     public String getHeader(String key) {
-        throw Unsupported.notLocal("HttpRequest.getHeader");
+        return headers.get(key);
     }
 
     public String getMethod() {
-        throw Unsupported.notLocal("HttpRequest.getMethod");
+        return method;
     }
 
     public void setBody(String body) {
-        throw Unsupported.notLocal("HttpRequest.setBody");
+        this.body = body == null ? "" : body;
     }
 
     public void setBodyAsBlob(Blob body) {
-        throw Unsupported.notLocal("HttpRequest.setBodyAsBlob");
+        this.body = body == null ? "" : body.toString();
     }
 
     public void setClientCertificate(String clientCert, String password) {
-        throw Unsupported.notLocal("HttpRequest.setClientCertificate");
+        // client certificates aren't applied locally; accepted so code type-checks and runs
     }
 
     public void setClientCertificateName(String certDevName) {
-        throw Unsupported.notLocal("HttpRequest.setClientCertificateName");
+        // see setClientCertificate
     }
 
     public void setCompressed(Boolean compressed) {
-        throw Unsupported.notLocal("HttpRequest.setCompressed");
+        this.compressed = compressed != null && compressed;
     }
 
     public void setEndpoint(String endpoint) {
-        throw Unsupported.notLocal("HttpRequest.setEndpoint");
+        this.endpoint = endpoint;
     }
 
     public void setHeader(String key, String value) {
-        throw Unsupported.notLocal("HttpRequest.setHeader");
+        headers.put(key, value);
     }
 
     public void setMethod(String method) {
-        throw Unsupported.notLocal("HttpRequest.setMethod");
+        this.method = method;
     }
 
     public void setTimeout(Integer timeout) {
-        throw Unsupported.notLocal("HttpRequest.setTimeout");
+        this.timeoutMs = timeout == null ? 0 : timeout;
+    }
+
+    // --- package-internal accessors for Http.send ---
+    LinkedHashMap<String, String> headerMap() {
+        return headers;
+    }
+
+    int timeoutMs() {
+        return timeoutMs;
     }
 }

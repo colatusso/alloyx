@@ -1,5 +1,6 @@
 package alloyx;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -79,18 +80,31 @@ class StdlibTypesTest {
     }
 
     @Test
-    void callingNativeApiFailsClearlyAtRuntime() throws Exception {
-        // recognized at compile time, but a callout doesn't run locally — it must
-        // fail loudly (UnsupportedOperationException), not silently do nothing
-        Path p = probe("Run", """
-            public class Run {
-                public static void go() {
-                    HttpRequest req = new HttpRequest();
-                    req.setEndpoint('x');
+    void encodingUtilRunsLocally() throws Exception {
+        // Blob + EncodingUtil run for real (no Salesforce, no network) — base64 is deterministic
+        Path p = probe("Enc2", """
+            public class Enc2 {
+                public static String go() {
+                    return EncodingUtil.base64Encode(Blob.valueOf('user:pass'));
                 }
             }
             """);
-        Class<?> c = Workspace.compile(List.of(p)).load("Run");
+        Class<?> c = Workspace.compile(List.of(p)).load("Enc2");
+        assertEquals("dXNlcjpwYXNz", c.getMethod("go").invoke(null));
+    }
+
+    @Test
+    void domStillFailsClearlyAtRuntime() throws Exception {
+        // Dom (XML) isn't implemented yet — calling it must fail loudly, not silently
+        Path p = probe("Xml", """
+            public class Xml {
+                public static void go() {
+                    Dom.Document d = new Dom.Document();
+                    d.load('<a/>');
+                }
+            }
+            """);
+        Class<?> c = Workspace.compile(List.of(p)).load("Xml");
         InvocationTargetException ex = assertThrows(InvocationTargetException.class,
             () -> c.getMethod("go").invoke(null));
         assertTrue(ex.getCause() instanceof UnsupportedOperationException,

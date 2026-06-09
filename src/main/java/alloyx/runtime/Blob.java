@@ -1,17 +1,35 @@
 package alloyx.runtime;
 
-/** Apex {@code Blob} — recognized for type-checking; not produced/consumed locally yet. */
+import java.nio.charset.StandardCharsets;
+
+/** Apex {@code Blob} — a binary buffer. Backed by a real byte[] so encoding works locally. */
 public final class Blob {
+    private final byte[] data;
+
+    private Blob(byte[] data) {
+        this.data = data == null ? new byte[0] : data;
+    }
+
+    /** Wrap raw bytes (package-internal: used by EncodingUtil/Http). */
+    static Blob of(byte[] bytes) {
+        return new Blob(bytes);
+    }
+
+    byte[] bytes() {
+        return data;
+    }
+
     public static Blob valueOf(String value) {
-        throw Unsupported.notLocal("Blob.valueOf");
+        return new Blob(value == null ? new byte[0] : value.getBytes(StandardCharsets.UTF_8));
     }
 
     public Integer size() {
-        throw Unsupported.notLocal("Blob.size");
+        return data.length;
     }
 
+    /** Apex {@code Blob.toString()} decodes the bytes as a UTF-8 string. */
     @Override
     public String toString() {
-        throw Unsupported.notLocal("Blob.toString");
+        return new String(data, StandardCharsets.UTF_8);
     }
 }

@@ -1,48 +1,60 @@
 package alloyx.runtime;
 
-/** Apex {@code System.HttpResponse} — recognized for type-checking; callouts don't run locally yet. */
+import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
+
+/** Apex {@code System.HttpResponse} — holds the real response {@link Http} got back. */
 public final class HttpResponse {
+    private String body = "";
+    private int statusCode;
+    private String status = "";
+    private final LinkedHashMap<String, String> headers = new LinkedHashMap<>();
+
     public String getBody() {
-        throw Unsupported.notLocal("HttpResponse.getBody");
+        return body;
     }
 
     public Blob getBodyAsBlob() {
-        throw Unsupported.notLocal("HttpResponse.getBodyAsBlob");
+        return Blob.of(body == null ? new byte[0] : body.getBytes(StandardCharsets.UTF_8));
     }
 
     public String getHeader(String key) {
-        throw Unsupported.notLocal("HttpResponse.getHeader");
+        return headers.get(key);
     }
 
     public List<String> getHeaderKeys() {
-        throw Unsupported.notLocal("HttpResponse.getHeaderKeys");
+        List<String> keys = new List<>();
+        for (String k : headers.keySet()) {
+            keys.add(k);
+        }
+        return keys;
     }
 
     public String getStatus() {
-        throw Unsupported.notLocal("HttpResponse.getStatus");
+        return status;
     }
 
     public Integer getStatusCode() {
-        throw Unsupported.notLocal("HttpResponse.getStatusCode");
+        return statusCode;
     }
 
     public void setBody(String body) {
-        throw Unsupported.notLocal("HttpResponse.setBody");
+        this.body = body == null ? "" : body;
     }
 
     public void setBodyAsBlob(Blob body) {
-        throw Unsupported.notLocal("HttpResponse.setBodyAsBlob");
+        this.body = body == null ? "" : body.toString();
     }
 
     public void setHeader(String key, String value) {
-        throw Unsupported.notLocal("HttpResponse.setHeader");
+        headers.put(key, value);
     }
 
     public void setStatus(String status) {
-        throw Unsupported.notLocal("HttpResponse.setStatus");
+        this.status = status;
     }
 
     public void setStatusCode(Integer statusCode) {
-        throw Unsupported.notLocal("HttpResponse.setStatusCode");
+        this.statusCode = statusCode == null ? 0 : statusCode;
     }
 }
