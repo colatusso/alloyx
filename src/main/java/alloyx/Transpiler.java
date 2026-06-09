@@ -45,7 +45,15 @@ final class Transpiler {
         "import alloyx.runtime.Pattern;",
         "import alloyx.runtime.Matcher;",
         "import alloyx.runtime.LoggingLevel;",
-        "import alloyx.runtime.Limits;");
+        "import alloyx.runtime.Limits;",
+        "import alloyx.runtime.Http;",
+        "import alloyx.runtime.HttpRequest;",
+        "import alloyx.runtime.HttpResponse;",
+        "import alloyx.runtime.Blob;",
+        "import alloyx.runtime.EncodingUtil;",
+        "import alloyx.runtime.dom.Document;",
+        "import alloyx.runtime.dom.XmlNode;",
+        "import alloyx.runtime.dom.XmlNodeType;");
 
     private static final Set<String> JAVA_SAME =
         Set.of("Integer", "Long", "Boolean", "String", "Object", "Double", "void");
@@ -53,7 +61,8 @@ final class Transpiler {
     // Apex Schema namespace types backed by runtime classes (not dynamic sObjects)
     private static final Set<String> SCHEMA_TYPES = Set.of("SObjectType", "DescribeSObjectResult");
     // native Apex System types backed by runtime classes (not dynamic sObjects)
-    private static final Set<String> RUNTIME_TYPES = Set.of("Pattern", "Matcher", "LoggingLevel", "Limits");
+    private static final Set<String> RUNTIME_TYPES = Set.of("Pattern", "Matcher", "LoggingLevel", "Limits",
+        "Http", "HttpRequest", "HttpResponse", "Blob", "EncodingUtil");
     // native Apex enums whose members are referenced case-insensitively (LoggingLevel.Info ==
     // LoggingLevel.INFO); the runtime backs them with canonical UPPER_CASE constants
     private static final Set<String> RUNTIME_ENUMS = Set.of("LoggingLevel");
@@ -800,12 +809,13 @@ final class Transpiler {
         String canon = BUILTINS.get(base.toLowerCase());
         if (canon != null) base = canon; // case-fold built-in type names (decimal -> Decimal)
         if (base.startsWith("Schema.")) base = base.substring("Schema.".length());
+        if (base.startsWith("System.")) base = base.substring("System.".length()); // System.Http -> Http
+        if (base.regionMatches(true, 0, "dom.", 0, 4)) return base.substring(4); // Dom.XmlNode -> XmlNode
         if (SCHEMA_TYPES.contains(base)) return base; // Schema.SObjectType -> runtime SObjectType
         if (RUNTIME_TYPES.contains(base)) return base; // Pattern / Matcher / LoggingLevel / Limits
         if (JAVA_SAME.contains(base)) return base;
         if (base.equals("Decimal") || base.equals("Date")
             || base.equals("Datetime") || base.equals("Time")) return base; // runtime types
-        if (base.equalsIgnoreCase("Blob")) return "Object"; // no runtime yet
         if (base.equals("Id")) return "String";
         if (COLLECTIONS.contains(base)) {
             if (lt < 0) {
