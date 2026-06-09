@@ -34,6 +34,14 @@ the JVM in milliseconds; the org is only touched if your code does SOQL/DML.
   Fill in the values — it's a full Apex block, so you can `new Account(...)`,
   `insert`, query, whatever — then hit **▶ Run** at the top.
 
+## Org & schema
+
+Runs that touch Salesforce (SOQL/DML/sObject) need an org, and typed checks need the
+org's sObject describes cached locally. Run **AlloyX: Sync Org Schema** from the command
+palette (`⌘⇧P`): with a `.cls` open, enter your org alias (from the `sf` CLI). It
+describes the sObjects your classes reference into a local cache, and saves the alias as
+`alloyx.org` so a Run targets the same org. The Run output shows that org at the top.
+
 ## How to install
 
 The extension drives the `allx` CLI, so set that up first and make sure a

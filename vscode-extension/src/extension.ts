@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import * as path from "path";
-import { execFile } from "child_process";
+import { execFile, spawn } from "child_process";
 
 // ---------------------------------------------------------------------------
 // Types mirroring the JSON emitted by `allx outline <file> --json`.
@@ -211,6 +211,61 @@ function runBuffer(uriStr?: string): void {
   runSnippet(doc.getText(), dir, info?.label ?? "anonymous Apex");
 }
 
+/**
+ * Describe the org's sObjects into the local schema cache (`allx schema sync`), so
+ * typed checks/runs work offline. Prompts for the org alias, saves it as alloyx.org
+ * (so a Run targets the same org), and runs against the open file's classes folder.
+ */
+async function syncSchema(): Promise<void> {
+  const cfg = vscode.workspace.getConfiguration("alloyx");
+  const alias = await vscode.window.showInputBox({
+    title: "AlloyX: Sync Org Schema",
+    prompt: "Org alias (from the sf CLI) to describe sObjects from — also saved as alloyx.org",
+    value: cfg.get<string>("org", ""),
+    placeHolder: "e.g. my-sandbox",
+  });
+  if (alias === undefined) {
+    return; // cancelled
+  }
+  const org = alias.trim();
+  if (!org) {
+    vscode.window.showWarningMessage("AlloyX: no org alias given.");
+    return;
+  }
+
+  // remember it so a Run targets the same org
+  const target = vscode.workspace.workspaceFolders?.length
+    ? vscode.ConfigurationTarget.Workspace
+    : vscode.ConfigurationTarget.Global;
+  await cfg.update("org", org, target);
+
+  // classes dir: the active .cls's folder, else the workspace folder
+  const active = vscode.window.activeTextEditor?.document;
+  const dir =
+    active && active.uri.fsPath.endsWith(".cls")
+      ? path.dirname(active.uri.fsPath)
+      : vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!dir) {
+    vscode.window.showWarningMessage(
+      "AlloyX: open a .cls (or a folder) so I know where your classes are."
+    );
+    return;
+  }
+
+  output.show(true);
+  output.appendLine(`\n⟳ Sync schema  (org: ${org}, classes: ${dir})`);
+  const child = spawn(cliPath(), ["schema", "sync", ".", "--org", org], {
+    cwd: dir,
+    env: execEnv(),
+  });
+  child.stdout.on("data", (d) => output.append(d.toString()));
+  child.stderr.on("data", (d) => output.append(d.toString()));
+  child.on("error", (e) => output.appendLine(String(e)));
+  child.on("close", (code) =>
+    output.appendLine(code === 0 ? "✓ schema synced" : `✗ sync exited with ${code}`)
+  );
+}
+
 // ---------------------------------------------------------------------------
 // CodeLens: "▶ Run" / "▶ Test" above each static / @isTest method, and a single
 // "▶ Run" at the top of a run-buffer. Both route into the one run path above.
@@ -383,6 +438,8 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("alloyx.runMethodAtCursor", () => runMethodAtCursor()),
     // ... and the ▶ Run at the top of a run-buffer.
     vscode.commands.registerCommand("alloyx.runBuffer", (uri?: string) => runBuffer(uri)),
+    // describe the org's sObjects into the local schema cache (also saves alloyx.org)
+    vscode.commands.registerCommand("alloyx.syncSchema", () => syncSchema()),
     // on-type (debounced), and immediate on save / open
     vscode.workspace.onDidChangeTextDocument((e) => schedule(e.document)),
     vscode.workspace.onDidSaveTextDocument((doc) => void refreshDiagnostics(doc, diagnostics)),

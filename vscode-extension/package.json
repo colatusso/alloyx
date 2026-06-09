@@ -32,6 +32,10 @@
       {
         "command": "alloyx.runBuffer",
         "title": "AlloyX: Run"
+      },
+      {
+        "command": "alloyx.syncSchema",
+        "title": "AlloyX: Sync Org Schema"
       }
     ],
     "menus": {
