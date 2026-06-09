@@ -51,6 +51,7 @@ final class Transpiler {
         "import alloyx.runtime.HttpResponse;",
         "import alloyx.runtime.Blob;",
         "import alloyx.runtime.EncodingUtil;",
+        "import alloyx.runtime.Trigger;",
         "import alloyx.runtime.dom.Document;",
         "import alloyx.runtime.dom.XmlNode;",
         "import alloyx.runtime.dom.XmlNodeType;");
@@ -62,7 +63,16 @@ final class Transpiler {
     private static final Set<String> SCHEMA_TYPES = Set.of("SObjectType", "DescribeSObjectResult");
     // native Apex System types backed by runtime classes (not dynamic sObjects)
     private static final Set<String> RUNTIME_TYPES = Set.of("Pattern", "Matcher", "LoggingLevel", "Limits",
-        "Http", "HttpRequest", "HttpResponse", "Blob", "EncodingUtil");
+        "Http", "HttpRequest", "HttpResponse", "Blob", "EncodingUtil", "Trigger");
+    // Apex trigger context members -> the runtime Trigger stub's fields (case-insensitive,
+    // as Apex is); `new` is a Java keyword so it maps to newRecords.
+    private static final java.util.Map<String, String> TRIGGER_MEMBERS = java.util.Map.ofEntries(
+        java.util.Map.entry("new", "newRecords"), java.util.Map.entry("old", "old"),
+        java.util.Map.entry("newmap", "newMap"), java.util.Map.entry("oldmap", "oldMap"),
+        java.util.Map.entry("size", "size"), java.util.Map.entry("isexecuting", "isExecuting"),
+        java.util.Map.entry("isinsert", "isInsert"), java.util.Map.entry("isupdate", "isUpdate"),
+        java.util.Map.entry("isdelete", "isDelete"), java.util.Map.entry("isundelete", "isUndelete"),
+        java.util.Map.entry("isbefore", "isBefore"), java.util.Map.entry("isafter", "isAfter"));
     // native Apex enums whose members are referenced case-insensitively (LoggingLevel.Info ==
     // LoggingLevel.INFO); the runtime backs them with canonical UPPER_CASE constants
     private static final Set<String> RUNTIME_ENUMS = Set.of("LoggingLevel");
@@ -584,6 +594,12 @@ final class Transpiler {
     }
 
     private String fieldAccess(Prop p) {
+        // Apex trigger context: Trigger.new (a Java keyword) and friends map onto the
+        // runtime Trigger stub's static fields (case-insensitive, like Apex).
+        if (p.target() instanceof Name tn && tn.ident().equalsIgnoreCase("Trigger")) {
+            String m = p.name().toLowerCase(java.util.Locale.ROOT);
+            return "Trigger." + TRIGGER_MEMBERS.getOrDefault(m, p.name());
+        }
         String parent = sObjectTypeOf(p.target());
         if (parent == null) {
             return emitExpr(p.target()) + "." + p.name(); // regular Java field/member

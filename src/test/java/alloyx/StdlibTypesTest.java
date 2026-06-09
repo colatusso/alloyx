@@ -63,6 +63,22 @@ class StdlibTypesTest {
     }
 
     @Test
+    void triggerContextIsRecognized() throws Exception {
+        // Trigger.new is a Java keyword (was emitted verbatim -> "identifier expected");
+        // Trigger.oldMap / Trigger.isInsert are context members. All must type-check.
+        Path p = probe("Handler", """
+            public class Handler {
+                public static void go() {
+                    List<Account> recs = (List<Account>) Trigger.new;
+                    Map<Id, Account> prev = (Map<Id, Account>) Trigger.oldMap;
+                    Boolean ins = Trigger.isInsert;
+                }
+            }
+            """);
+        Workspace.compile(List.of(p)); // compiles == trigger context recognized
+    }
+
+    @Test
     void callingNativeApiFailsClearlyAtRuntime() throws Exception {
         // recognized at compile time, but a callout doesn't run locally — it must
         // fail loudly (UnsupportedOperationException), not silently do nothing
