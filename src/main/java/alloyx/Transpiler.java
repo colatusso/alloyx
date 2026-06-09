@@ -254,16 +254,29 @@ final class Transpiler {
             sb.append(";\n");
         }
 
-        // Apex implicitly gives exception subclasses the standard constructors;
-        // inject them so `new MyException('msg')` works, when none are declared
+        // Apex gives every Exception subclass the built-in constructors (no-arg and
+        // (String)) REGARDLESS of any custom ones declared — so `new MyException('x')`
+        // works even when the class declares only, say, a (HttpResponse) constructor.
+        // Inject the built-ins not already declared (matched by Java param signature),
+        // so a custom constructor no longer suppresses them.
         boolean isException = cls.superclass() != null
             && (cls.superclass().equals("Exception") || cls.superclass().endsWith("Exception"));
-        boolean hasCtor = cls.methods().stream().anyMatch(m -> m.name().equals(cls.name()));
-        if (!iface && isException && !hasCtor) {
+        if (!iface && isException) {
+            java.util.Set<String> ctorSigs = new java.util.HashSet<>();
+            for (MethodDecl m : cls.methods()) {
+                if (m.name().equals(cls.name())) {
+                    ctorSigs.add(m.params().stream().map(p -> mapType(p.type()))
+                        .collect(java.util.stream.Collectors.joining(",")));
+                }
+            }
             sb.append('\n');
-            sb.append(member).append("public ").append(cls.name()).append("() { super(); }\n");
-            sb.append(member).append("public ").append(cls.name())
-              .append("(String message) { super(message); }\n");
+            if (ctorSigs.add("")) {
+                sb.append(member).append("public ").append(cls.name()).append("() { super(); }\n");
+            }
+            if (ctorSigs.add("String")) {
+                sb.append(member).append("public ").append(cls.name())
+                  .append("(String message) { super(message); }\n");
+            }
         }
 
         // Apex overloads by distinct sObject types (generate(Account)/generate(Contact))
