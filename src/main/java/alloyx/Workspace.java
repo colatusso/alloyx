@@ -186,6 +186,28 @@ final class Workspace {
     }
 
     /**
+     * The workspace classes referenced DIRECTLY in {@code source} — its superclass
+     * and the classes used in its body — first level only, no transitive closure.
+     * Used by `check` to resolve inherited members and external types without
+     * dragging in the whole dependency tree. {@code self} is excluded.
+     */
+    static List<Path> directDeps(String source, Path dir, String self) throws IOException {
+        Map<String, Path> index = new HashMap<>();
+        if (dir != null && Files.isDirectory(dir)) {
+            for (Path p : clsAt(dir)) {
+                index.put(classNameOf(p), p);
+            }
+        }
+        LinkedHashMap<String, Path> out = new LinkedHashMap<>();
+        for (Lexer.Token t : Lexer.tokenize(source)) {
+            if (t.kind().equals("IDENT") && !t.value().equals(self) && index.containsKey(t.value())) {
+                out.putIfAbsent(t.value(), index.get(t.value()));
+            }
+        }
+        return new ArrayList<>(out.values());
+    }
+
+    /**
      * The sObject-looking type names referenced by the given files — what
      * {@code allx schema sync} describes and caches. Tolerant: files that don't
      * parse are skipped (discovery shouldn't fail on one bad class).
@@ -244,8 +266,28 @@ final class Workspace {
 
         Files.createDirectories(CACHE_DIR);
         var schema = new alloyx.runtime.SchemaCache(alloyx.runtime.Database.gateway());
-        List<ClassDecl> decls = List.of(cls);
-        Set<String> userClasses = new HashSet<>(Set.of(cls.name()));
+
+        // Compile the open class together with the classes it references DIRECTLY
+        // (its superclass + the workspace classes used in its body) — first level
+        // only. Without them every inherited field/method and every external type
+        // reads as a bogus "cannot find symbol". The deps' own diagnostics are
+        // dropped below; only the open file's are surfaced. A dep that doesn't
+        // parse/transpile is skipped (best effort), costing only residual (filtered)
+        // diagnostics.
+        Path dir = target.toAbsolutePath().getParent();
+        List<ClassDecl> decls = new ArrayList<>();
+        decls.add(cls);
+        for (Path dep : directDeps(src, dir, cls.name())) {
+            try {
+                decls.add(Parser.parse(Files.readString(dep)));
+            } catch (RuntimeException | StackOverflowError skip) {
+                // unparseable dep: leave it out
+            }
+        }
+        Set<String> userClasses = new HashSet<>();
+        for (ClassDecl d : decls) {
+            userClasses.add(d.name());
+        }
         Set<String> typedSObjects = new LinkedHashSet<>();
         for (String name : SObjectScan.referenced(decls)) {
             if (!userClasses.contains(name) && !NON_SOBJECT.contains(name)
@@ -260,11 +302,26 @@ final class Workspace {
             Files.writeString(jf, SObjectClassGen.generate(name, schema.fields(name), typedSObjects));
             javaFiles.add(jf.toString());
         }
+        // target transpiled with a line map (to map its javac lines back to .cls);
+        // direct deps transpiled plainly, only so their types/members resolve.
         Transpiler.Result r = Transpiler.transpileWithLines(
             cls, userClasses, schema, typedSObjects, parsed.stmtLines());
         Path targetJava = CACHE_DIR.resolve(cls.name() + ".java");
         Files.writeString(targetJava, r.source());
         javaFiles.add(targetJava.toString());
+        for (ClassDecl d : decls) {
+            if (d == cls) {
+                continue;
+            }
+            try {
+                String depSrc = Transpiler.transpile(d, userClasses, schema, typedSObjects).source();
+                Path jf = CACHE_DIR.resolve(d.name() + ".java");
+                Files.writeString(jf, depSrc);
+                javaFiles.add(jf.toString());
+            } catch (RuntimeException | StackOverflowError skip) {
+                // dep that doesn't transpile: leave it out (best effort)
+            }
+        }
 
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
         if (compiler == null) {

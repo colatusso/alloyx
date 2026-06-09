@@ -62,7 +62,9 @@ function getOutline(absFile: string): Promise<Outline | undefined> {
     execFile(
       cliPath(),
       ["outline", absFile, "--json"],
-      { timeout: 15000, env: execEnv() },
+      // cwd = the file's folder so the `.apexcache/schema` synced next to the
+      // classes is found (the workspace root usually has none).
+      { timeout: 15000, env: execEnv(), cwd: path.dirname(absFile) },
       (err, stdout) => {
         if (err) {
           resolve(undefined);
@@ -119,7 +121,8 @@ function runSnippet(snippet: string, dir: string, label: string): void {
   const child = execFile(
     cliPath(),
     ["eval", "--stdin", "--dir", dir],
-    { env: execEnv(), timeout: 60000, maxBuffer: 8 * 1024 * 1024 },
+    // cwd = the classes dir so the synced `.apexcache/schema` is found
+    { env: execEnv(), timeout: 60000, maxBuffer: 8 * 1024 * 1024, cwd: dir },
     (err, stdout, stderr) => {
       if (stdout) {
         output.append(stdout);
@@ -272,7 +275,8 @@ function checkSource(absFile: string, source: string): Promise<CheckDiag[]> {
     const child = execFile(
       cliPath(),
       ["check", absFile, "--stdin"],
-      { timeout: 15000, maxBuffer: 8 * 1024 * 1024, env: execEnv() },
+      // cwd = the file's folder so the synced `.apexcache/schema` is found
+      { timeout: 15000, maxBuffer: 8 * 1024 * 1024, env: execEnv(), cwd: path.dirname(absFile) },
       (_err, stdout) => {
         try {
           resolve(JSON.parse(stdout.trim()) as CheckDiag[]);
