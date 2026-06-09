@@ -71,6 +71,7 @@ Set it in Settings (example path — use your own):
 | Setting               | Default | Description                                                                |
 | --------------------- | ------- | -------------------------------------------------------------------------- |
 | `alloyx.cliPath`      | `allx`  | Path to the `allx` binary. Defaults to a `PATH` lookup.                    |
+| `alloyx.org`          | `""`    | Org alias for runs that do SOQL/DML/sObject. Passed as `--org` (else `alloyx.json`). |
 | `alloyx.checkDelayMs` | `1500`  | Idle time (ms) after typing stops before a `.cls` is re-checked.           |
 | `alloyx.javaHome`     | `""`    | JDK path used to run `allx`, for when VS Code can't see your shell's env.   |
 

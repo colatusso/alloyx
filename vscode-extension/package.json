@@ -61,6 +61,11 @@
           "default": "allx",
           "description": "Path to the allx CLI binary. Defaults to 'allx' (resolved via PATH)."
         },
+        "alloyx.org": {
+          "type": "string",
+          "default": "",
+          "description": "Salesforce org alias (from the sf CLI) to use when a run does SOQL/DML/sObject. Passed as --org. Leave empty to fall back to alloyx.json."
+        },
         "alloyx.checkDelayMs": {
           "type": "number",
           "default": 1500,

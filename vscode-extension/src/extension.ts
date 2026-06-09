@@ -31,6 +31,12 @@ function cliPath(): string {
   return vscode.workspace.getConfiguration("alloyx").get<string>("cliPath", "allx");
 }
 
+/** `--org <alias>` when alloyx.org is set, so a run's SOQL/DML/sObject hits that org. */
+function orgArgs(): string[] {
+  const org = vscode.workspace.getConfiguration("alloyx").get<string>("org", "").trim();
+  return org ? ["--org", org] : [];
+}
+
 /**
  * Environment for the allx child process. The VS Code GUI usually lacks JAVA_HOME
  * (it doesn't source the login shell), so the allx launcher falls back to the macOS
@@ -120,7 +126,7 @@ function runSnippet(snippet: string, dir: string, label: string): void {
   output.appendLine(`\n▶ Run  ${label}`);
   const child = execFile(
     cliPath(),
-    ["eval", "--stdin", "--dir", dir],
+    ["eval", "--stdin", "--dir", dir, ...orgArgs()],
     // cwd = the classes dir so the synced `.apexcache/schema` is found
     { env: execEnv(), timeout: 60000, maxBuffer: 8 * 1024 * 1024, cwd: dir },
     (err, stdout, stderr) => {
