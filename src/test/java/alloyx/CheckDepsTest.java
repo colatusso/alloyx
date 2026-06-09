@@ -76,6 +76,47 @@ class CheckDepsTest {
     }
 
     @Test
+    void methodInheritedFromTheDepsBaseResolves() throws Exception {
+        // Repo's save() lives in GrandBase (Repo extends GrandBase). Repo is a direct
+        // dep of the open class; GrandBase is one level below it. The inheritance chain
+        // must be pulled into the compile set so repo.save(...) resolves.
+        write("GrandBase", """
+            public virtual class GrandBase {
+                public void save(Object record) { }
+            }
+            """);
+        write("Repo", "public virtual class Repo extends GrandBase { }");
+        Path client = write("Client", """
+            public class Client {
+                public void go() {
+                    Repo r = new Repo();
+                    r.save(null);
+                }
+            }
+            """);
+        List<Workspace.Diag> diags = Workspace.check(client);
+        assertFalse(hasMissingSymbol(diags),
+            "save() inherited from the dep's grandparent must resolve: " + diags);
+    }
+
+    @Test
+    void innerClassImplementsInterfaceIsRecognized() throws Exception {
+        // an inner class `implements Pay` must actually satisfy Pay — the parser used
+        // to drop the inner's `implements`, so make() returning the inner as Pay failed.
+        write("Pay", "public interface Pay { void charge(); }");
+        write("Wallet", """
+            public class Wallet {
+                public class Card implements Pay {
+                    public void charge() { }
+                }
+                public static Pay make() { return new Card(); }
+            }
+            """);
+        // compiles only if the inner Card is actually a Pay
+        Workspace.compile(List.of(dir.resolve("Pay.cls"), dir.resolve("Wallet.cls")));
+    }
+
+    @Test
     void doubleQuotedStringReportedClearly() throws Exception {
         Path p = write("Dq", """
             public class Dq {

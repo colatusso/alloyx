@@ -265,7 +265,17 @@ final class Parser {
                 String innerName = parts.get(parts.indexOf(kw) + 1);
                 String sup = parts.contains("extends")
                     ? parts.get(parts.indexOf("extends") + 1) : null;
-                return parseClassBody(innerName, sup, new ArrayList<>(), kw);
+                // capture the inner type's interfaces too (was dropped, so an inner
+                // `class X implements Y` lost the `implements Y` and didn't satisfy Y).
+                // modifiers/keyword/name/extends/implements all arrived in `parts`.
+                List<String> innerInterfaces = new ArrayList<>();
+                int implAt = parts.indexOf("implements");
+                if (implAt >= 0) {
+                    for (int k = implAt + 1; k < parts.size(); k++) {
+                        innerInterfaces.add(base(parts.get(k)));
+                    }
+                }
+                return parseClassBody(innerName, sup, innerInterfaces, kw);
             }
             // property (Type name { get; set; }) or a static{} initializer block
             skipBalancedBraces();

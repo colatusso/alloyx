@@ -284,6 +284,57 @@ final class Workspace {
                 // unparseable dep: leave it out
             }
         }
+        // Pull in the inheritance chain (extends/implements) of the target and its
+        // direct deps, recursively, so inherited members (a repository's save()) and
+        // base/interface types resolve. Structural ancestors only — not general
+        // transitive use — so the compile set stays small.
+        Map<String, Path> wsIndex = new HashMap<>();
+        if (dir != null && Files.isDirectory(dir)) {
+            for (Path pth : clsAt(dir)) {
+                wsIndex.put(classNameOf(pth), pth);
+            }
+        }
+        Set<String> have = new HashSet<>();
+        for (ClassDecl d : decls) {
+            have.add(d.name());
+        }
+        Deque<ClassDecl> pending = new ArrayDeque<>(decls);
+        while (!pending.isEmpty()) {
+            ClassDecl d = pending.poll();
+            // follow nested types too: an inner class may implement an interface that
+            // must be in the compile set for the inner to satisfy it (e.g. a proxy's
+            // ServiceSoap implements SoapProxyService).
+            if (d.inners() != null) {
+                for (ClassDecl inner : d.inners()) {
+                    pending.add(inner);
+                }
+            }
+            List<String> supers = new ArrayList<>();
+            if (d.superclass() != null) {
+                supers.add(d.superclass());
+            }
+            if (d.interfaces() != null) {
+                supers.addAll(d.interfaces());
+            }
+            for (String s : supers) {
+                String name = s.replaceAll("<.*>", "").trim();
+                int dotAt = name.lastIndexOf('.');
+                if (dotAt >= 0) {
+                    name = name.substring(dotAt + 1);
+                }
+                if (have.contains(name) || !wsIndex.containsKey(name)) {
+                    continue;
+                }
+                try {
+                    ClassDecl ancestor = Parser.parse(Files.readString(wsIndex.get(name)));
+                    decls.add(ancestor);
+                    have.add(name);
+                    pending.add(ancestor);
+                } catch (RuntimeException | StackOverflowError skip) {
+                    // unparseable ancestor: leave it out
+                }
+            }
+        }
         Set<String> userClasses = new HashSet<>();
         for (ClassDecl d : decls) {
             userClasses.add(d.name());
