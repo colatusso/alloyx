@@ -184,11 +184,13 @@ public final class Cli {
             new com.google.gson.GsonBuilder().disableHtmlEscaping().create().toJson(diags));
     }
 
-    private static void connectOrg(String cliOrg, Path start) {
+    /** Connect to the resolved org (--org, else alloyx.json); returns the alias, or null if none. */
+    private static String connectOrg(String cliOrg, Path start) {
         String org = cliOrg != null ? cliOrg : Config.findOrg(start).orElse(null);
         if (org != null) {
             Database.setGateway(new SalesforceGateway(org));
         }
+        return org;
     }
 
     private static void run(String[] args) throws Exception {
@@ -262,7 +264,11 @@ public final class Cli {
             java.lang.System.exit(2);
             return;
         }
-        connectOrg(org, dir);
+        String targetOrg = connectOrg(org, dir);
+        // surface the org so a SOQL/DML run makes clear which org it hits (or that it's local)
+        java.lang.System.out.println(targetOrg != null
+            ? "org: " + targetOrg
+            : "org: (none — local only; SOQL/DML will fail)");
 
         // Wrap the block in a static method of a throwaway class, then compile and
         // invoke it like any other workspace class. The name is unlikely to collide;
