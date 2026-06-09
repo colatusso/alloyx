@@ -142,6 +142,26 @@ class TypedSObjectTest {
     }
 
     @Test
+    void thisFieldSObjectAccess_usesTypedGetter() throws Exception {
+        // an sObject-typed *field*, read/written via this.field.X, must use the typed
+        // getter/setter just like a local. Before the fix `this` resolved to null, so
+        // this.acct.NumberOfEmployees stayed a (nonexistent) direct field access.
+        Path p = probe("Box", """
+            public class Box {
+                private Account acct;
+                public Integer bump() {
+                    this.acct = new Account(NumberOfEmployees = 10);
+                    this.acct.NumberOfEmployees = this.acct.NumberOfEmployees + 5;
+                    return this.acct.NumberOfEmployees;
+                }
+            }
+            """);
+        Class<?> c = Workspace.compile(List.of(p)).load("Box");
+        Object box = c.getDeclaredConstructor().newInstance();
+        assertEquals(Integer.valueOf(15), c.getMethod("bump").invoke(box));
+    }
+
+    @Test
     void offlineRun_withoutSchema_staysGeneric() throws Exception {
         // no describe available -> Account stays the dynamic SObject (the pre-typing path),
         // so primitives-only logic and untyped field access still run 100% offline

@@ -138,6 +138,13 @@ final class Transpiler {
             case New nw -> isSObjectName(base(nw.type())) ? base(nw.type()) : null;
             case SObjectLit so -> base(so.type());
             case Prop p -> {
+                // this.<field>: resolve to the field's own declared type. Fields are
+                // copied into `locals`, but the target `this` resolves to null above,
+                // so this.lead.CNPJ__c would miss the getter without this.
+                if (p.target() instanceof Name tn && tn.ident().equals("this")) {
+                    String ft0 = locals.get(p.name());
+                    yield ft0 != null && isSObjectName(base(ft0)) ? base(ft0) : null;
+                }
                 String parent = sObjectTypeOf(p.target());
                 if (parent == null) {
                     yield null;
@@ -832,6 +839,11 @@ final class Transpiler {
         }
         if (userClasses.contains(base)) return base;
         if (typedSObjects.contains(base)) return base; // generated typed sObject class
+        // a qualified type A.B whose outer A is a known class: an inner-class reference.
+        // Apex inner classes transpile to Java static nested classes, so A.B stays A.B
+        // (e.g. SomeProxy.ResponseElement) instead of collapsing to the dynamic SObject.
+        int dot = base.indexOf('.');
+        if (dot > 0 && userClasses.contains(base.substring(0, dot))) return base;
         // base Exception and platform exceptions (DmlException, QueryException, …)
         // collapse onto the runtime base; user-defined ones keep their name above
         if (base.equals("Exception") || base.endsWith("Exception")) return "ApexException";
