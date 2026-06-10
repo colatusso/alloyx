@@ -652,7 +652,18 @@ final class Transpiler {
         }
         String get = emitExpr(p.target()) + ".get(\"" + p.name() + "\")";
         String ft = schema.fieldType(parent, p.name());
-        return ft != null ? "((" + mapType(ft) + ") " + get + ")" : get; // typed via describe, else Object
+        if (ft == null) {
+            return get; // not described -> Object
+        }
+        // Coerce numeric describe types the same way the generated getters do, so a
+        // currency field that SOQL returned as an Integer doesn't CCE on a (Decimal) cast.
+        return switch (mapType(ft)) {
+            case "Decimal" -> "SObject.asDecimal(" + get + ")";
+            case "Integer" -> "SObject.asInteger(" + get + ")";
+            case "Long" -> "SObject.asLong(" + get + ")";
+            case "Double" -> "SObject.asDouble(" + get + ")";
+            default -> "((" + mapType(ft) + ") " + get + ")";
+        };
     }
 
     /** The declared (Apex) type of a target we can read cheaply: a local/param, or this.field. */

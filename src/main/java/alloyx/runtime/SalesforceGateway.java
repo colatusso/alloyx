@@ -97,10 +97,30 @@ public final class SalesforceGateway implements OrgGateway {
             ensureAuth();
             String q = inlineBinds(soql, binds);
             String url = dataUrl("/query") + "?q=" + URLEncoder.encode(q, StandardCharsets.UTF_8);
-            return parseRecords(http.call("GET", url, authHeaders(), null));
+            List<SObject> out = new List<>();
+            // Salesforce caps a /query page (default 2000 rows). When the result spills
+            // over, the body carries "done": false + a server-relative "nextRecordsUrl"
+            // (".../query/01g..."); follow it as-is (already encoded, do not re-append
+            // /query) until done, accumulating every page into the same list.
+            String json = httpGet(url);
+            while (true) {
+                JsonObject root = JsonParser.parseString(json).getAsJsonObject();
+                appendRecords(root, out);
+                if (root.has("done") && !root.get("done").getAsBoolean()
+                        && root.has("nextRecordsUrl") && !root.get("nextRecordsUrl").isJsonNull()) {
+                    json = httpGet(instanceUrl + root.get("nextRecordsUrl").getAsString());
+                } else {
+                    return out;
+                }
+            }
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
+    }
+
+    /** GET seam: goes through the injectable {@link HttpCaller}, so tests feed page JSON. */
+    private String httpGet(String url) throws Exception {
+        return http.call("GET", url, authHeaders(), null);
     }
 
     @Override
@@ -132,6 +152,30 @@ public final class SalesforceGateway implements OrgGateway {
             }
         } catch (Exception e) {
             throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public void upsert(List<SObject> records) {
+        // REST has no batch upsert by Id, so split per the same rule the REST API uses:
+        // a record carrying an Id is an UPDATE (PATCH /sobjects/<Type>/<Id>), one without
+        // is an INSERT (POST /sobjects/<Type>). The gateway's upsert carries no external-id
+        // field (Database.upsert drops it locally), so the by-external-id endpoint isn't used.
+        List<SObject> toInsert = new List<>();
+        List<SObject> toUpdate = new List<>();
+        for (SObject r : records) {
+            Object id = r.get("Id");
+            if (id == null || id.toString().isEmpty()) {
+                toInsert.add(r);
+            } else {
+                toUpdate.add(r);
+            }
+        }
+        if (!toUpdate.isEmpty()) {
+            update(toUpdate);
+        }
+        if (!toInsert.isEmpty()) {
+            insert(toInsert);
         }
     }
 
@@ -258,38 +302,67 @@ public final class SalesforceGateway implements OrgGateway {
     }
 
     // --- helpers
-    private List<SObject> parseRecords(String json) {
+    /** Parse one whole /query response (single page). Kept for direct testing. */
+    static List<SObject> parseRecords(String json) {
         List<SObject> out = new List<>();
-        JsonObject root = JsonParser.parseString(json).getAsJsonObject();
-        JsonArray records = root.getAsJsonArray("records");
-        if (records != null) {
-            for (JsonElement el : records) {
-                JsonObject rec = el.getAsJsonObject();
-                String type = rec.has("attributes")
-                    ? rec.getAsJsonObject("attributes").get("type").getAsString() : "SObject";
-                java.util.List<Object> kv = new ArrayList<>();
-                for (var entry : rec.entrySet()) {
-                    if (entry.getKey().equals("attributes")) {
-                        continue;
-                    }
-                    kv.add(entry.getKey());
-                    kv.add(jsonValue(entry.getValue()));
-                }
-                out.add(new SObject(type, kv.toArray()));
-            }
-        }
+        appendRecords(JsonParser.parseString(json).getAsJsonObject(), out);
         return out;
     }
 
+    /** Append this page's "records" array (typed via {@link #jsonValue}) into {@code out}. */
+    static void appendRecords(JsonObject root, List<SObject> out) {
+        JsonArray records = root.getAsJsonArray("records");
+        if (records == null) {
+            return;
+        }
+        for (JsonElement el : records) {
+            JsonObject rec = el.getAsJsonObject();
+            String type = rec.has("attributes")
+                ? rec.getAsJsonObject("attributes").get("type").getAsString() : "SObject";
+            java.util.List<Object> kv = new ArrayList<>();
+            for (var entry : rec.entrySet()) {
+                if (entry.getKey().equals("attributes")) {
+                    continue;
+                }
+                kv.add(entry.getKey());
+                kv.add(jsonValue(entry.getValue()));
+            }
+            out.add(new SObject(type, kv.toArray()));
+        }
+    }
+
+    /**
+     * Map a SOQL JSON value to the runtime type so downstream arithmetic matches the
+     * org: booleans -> Boolean, integral numbers -> Integer (or Long on int overflow),
+     * fractional numbers -> {@link Decimal}, everything else (Id/date/datetime/text) ->
+     * String. The integral/fractional split mirrors {@link JSON#deserializeUntyped} and
+     * uses BigDecimal.scale to avoid a double round-trip. Nested objects/arrays (parent
+     * records, subqueries) keep their existing raw-JSON-string behavior — out of scope.
+     */
     private static Object jsonValue(JsonElement el) {
         if (el.isJsonNull()) {
             return null;
         }
         if (el.isJsonPrimitive()) {
             var p = el.getAsJsonPrimitive();
-            if (p.isBoolean()) return p.getAsBoolean();
-            if (p.isNumber()) return p.getAsString();
-            return p.getAsString();
+            if (p.isBoolean()) {
+                return p.getAsBoolean();
+            }
+            if (p.isNumber()) {
+                java.math.BigDecimal n = p.getAsBigDecimal();
+                if (n.stripTrailingZeros().scale() <= 0) {
+                    java.math.BigInteger i = n.toBigInteger();
+                    if (i.bitLength() < 32) {
+                        return i.intValue(); // fits a 32-bit Apex Integer
+                    }
+                    if (i.bitLength() < 64) {
+                        return i.longValue();
+                    }
+                    return new Decimal(n.toPlainString()); // beyond Long: keep precision
+                }
+                return new Decimal(n.toPlainString());
+            }
+            return p.getAsString(); // Id/date/datetime/text stay String
         }
         return el.toString();
     }

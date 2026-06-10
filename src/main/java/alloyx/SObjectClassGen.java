@@ -46,14 +46,30 @@ final class SObjectClassGen {
         for (Map.Entry<String, String> e : fields.entrySet()) {
             String field = e.getKey();
             String javaType = javaType(e.getValue(), typed);
-            // typed accessors over the inherited dynamic map (single backing store)
+            // typed accessors over the inherited dynamic map (single backing store).
+            // Numeric reads go through SObject.asX so a SOQL value that came back as a
+            // different numeric runtime type (Integer "100" for a Decimal currency field,
+            // Long for an Integer field) is coerced to the declared type instead of CCE'ing
+            // on a raw cast; everything else keeps the plain cast.
             sb.append("    public ").append(javaType).append(" get").append(field)
-              .append("() { return (").append(javaType).append(") get(\"").append(field).append("\"); }\n");
+              .append("() { return ").append(getterExpr(javaType, field)).append("; }\n");
             sb.append("    public void set").append(field).append('(').append(javaType)
               .append(" value) { put(\"").append(field).append("\", value); }\n");
         }
         sb.append("}\n");
         return sb.toString();
+    }
+
+    /** Getter body: numeric types coerce via SObject.asX, the rest take a plain cast. */
+    private static String getterExpr(String javaType, String field) {
+        String read = "get(\"" + field + "\")";
+        return switch (javaType) {
+            case "Decimal" -> "SObject.asDecimal(" + read + ")";
+            case "Integer" -> "SObject.asInteger(" + read + ")";
+            case "Long" -> "SObject.asLong(" + read + ")";
+            case "Double" -> "SObject.asDouble(" + read + ")";
+            default -> "(" + javaType + ") " + read;
+        };
     }
 
     private static String javaType(String apexType, Set<String> typed) {

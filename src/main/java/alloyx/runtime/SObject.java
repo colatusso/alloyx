@@ -75,6 +75,62 @@ public class SObject {
         return fields;
     }
 
+    // --- numeric field coercion -------------------------------------------
+    // SOQL returns numbers as JSON primitives that the gateway maps to Integer,
+    // Long or Decimal based on the literal (integral vs fractional), independent
+    // of the field's describe type: a currency field is "100" on one row and
+    // "100.5" on the next. The typed getters (SObjectClassGen) and the described
+    // dynamic-access path (Transpiler) declare one Java type per field, so they
+    // route reads through these helpers to coerce any numeric runtime type to the
+    // field's declared type. Non-numeric values and null pass through untouched.
+
+    /** Coerce a stored field value to {@link Decimal} (currency/percent/double fields). */
+    public static Decimal asDecimal(Object v) {
+        return v == null ? null : Decimal.valueOf(v);
+    }
+
+    /** Coerce a stored field value to {@code Integer} (Apex Integer fields). */
+    public static Integer asInteger(Object v) {
+        if (v == null) {
+            return null;
+        }
+        if (v instanceof Integer i) {
+            return i;
+        }
+        if (v instanceof Number n) {
+            return n.intValue();
+        }
+        return Integer.valueOf(v.toString().trim());
+    }
+
+    /** Coerce a stored field value to {@code Long} (Apex Long fields). */
+    public static Long asLong(Object v) {
+        if (v == null) {
+            return null;
+        }
+        if (v instanceof Long l) {
+            return l;
+        }
+        if (v instanceof Number n) {
+            return n.longValue();
+        }
+        return Long.valueOf(v.toString().trim());
+    }
+
+    /** Coerce a stored field value to {@code Double} (Apex Double fields). */
+    public static Double asDouble(Object v) {
+        if (v == null) {
+            return null;
+        }
+        if (v instanceof Double d) {
+            return d;
+        }
+        if (v instanceof Number n) {
+            return n.doubleValue();
+        }
+        return Double.valueOf(v.toString().trim());
+    }
+
     @Override
     public boolean equals(Object o) {
         return o instanceof SObject s
