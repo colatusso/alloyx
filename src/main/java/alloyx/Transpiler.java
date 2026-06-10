@@ -52,6 +52,7 @@ final class Transpiler {
         "import alloyx.runtime.Blob;",
         "import alloyx.runtime.EncodingUtil;",
         "import alloyx.runtime.Trigger;",
+        "import alloyx.runtime.Test;",
         "import alloyx.runtime.dom.Document;",
         "import alloyx.runtime.dom.XmlNode;",
         "import alloyx.runtime.dom.XmlNodeType;");
@@ -63,7 +64,19 @@ final class Transpiler {
     private static final Set<String> SCHEMA_TYPES = Set.of("SObjectType", "DescribeSObjectResult");
     // native Apex System types backed by runtime classes (not dynamic sObjects)
     private static final Set<String> RUNTIME_TYPES = Set.of("Pattern", "Matcher", "LoggingLevel", "Limits",
-        "Http", "HttpRequest", "HttpResponse", "Blob", "EncodingUtil", "Trigger");
+        "Http", "HttpRequest", "HttpResponse", "Blob", "EncodingUtil", "Trigger", "Test");
+    // Database namespace result types: nested classes on the runtime Database, kept qualified
+    private static final Set<String> DATABASE_TYPES =
+        Set.of("SaveResult", "UpsertResult", "DeleteResult", "Error");
+    // Apex is case-insensitive, so HTTPRequest == HttpRequest and blob == Blob; map a lowercased
+    // native type name back to its canonical runtime class.
+    private static final java.util.Map<String, String> RUNTIME_CANON = lowerIndex(RUNTIME_TYPES);
+
+    private static java.util.Map<String, String> lowerIndex(Set<String> names) {
+        java.util.Map<String, String> m = new java.util.HashMap<>();
+        for (String n : names) m.put(n.toLowerCase(java.util.Locale.ROOT), n);
+        return m;
+    }
     // Apex trigger context members -> the runtime Trigger stub's fields (case-insensitive,
     // as Apex is); `new` is a Java keyword so it maps to newRecords.
     private static final java.util.Map<String, String> TRIGGER_MEMBERS = java.util.Map.ofEntries(
@@ -892,8 +905,13 @@ final class Transpiler {
         if (base.startsWith("Schema.")) base = base.substring("Schema.".length());
         if (base.startsWith("System.")) base = base.substring("System.".length()); // System.Http -> Http
         if (base.regionMatches(true, 0, "dom.", 0, 4)) return base.substring(4); // Dom.XmlNode -> XmlNode
+        // Database.SaveResult / Database.Error stay qualified (nested classes on runtime Database)
+        if (base.startsWith("Database.") && DATABASE_TYPES.contains(base.substring("Database.".length())))
+            return base;
         if (SCHEMA_TYPES.contains(base)) return base; // Schema.SObjectType -> runtime SObjectType
-        if (RUNTIME_TYPES.contains(base)) return base; // Pattern / Matcher / LoggingLevel / Limits
+        // native System types, case-insensitive (Apex): HTTPRequest -> HttpRequest, blob -> Blob
+        String runtimeCanon = RUNTIME_CANON.get(base.toLowerCase(java.util.Locale.ROOT));
+        if (runtimeCanon != null) return runtimeCanon;
         if (JAVA_SAME.contains(base)) return base;
         if (base.equals("Decimal") || base.equals("Date")
             || base.equals("Datetime") || base.equals("Time")) return base; // runtime types

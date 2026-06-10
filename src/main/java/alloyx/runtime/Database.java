@@ -27,52 +27,58 @@ public final class Database {
         return gateway.query(soql, java.util.Map.of());
     }
 
-    // DML returns the processed records (Apex returns Database.*Result[]; locally we have
-    // no real SaveResult, so we hand back the records, which satisfies `return Database.x(...)`
-    // and `List<Database.SaveResult> r = ...`). The extra arg (allOrNone / DmlOptions /
-    // external-id field) doesn't change local behavior — there's no partial-success engine.
-    public static List<SObject> insert(Object records) {
+    // Apex DML returns per-row result objects (Database.SaveResult[] and friends). The records
+    // are processed through the gateway; the per-row outcome isn't modeled locally yet, so the
+    // results are recognized for type-checking but inspecting one fails clearly (see DmlResult).
+    // The extra arg (allOrNone / DmlOptions / external-id field) doesn't change local behavior.
+    public static List<SaveResult> insert(Object records) {
         List<SObject> r = asList(records);
         gateway.insert(r);
-        return r;
+        return filled(r.size(), SaveResult::new);
     }
 
-    public static List<SObject> insert(Object records, Object allOrNoneOrOptions) {
+    public static List<SaveResult> insert(Object records, Object allOrNoneOrOptions) {
         return insert(records);
     }
 
-    public static List<SObject> update(Object records) {
+    public static List<SaveResult> update(Object records) {
         List<SObject> r = asList(records);
         gateway.update(r);
-        return r;
+        return filled(r.size(), SaveResult::new);
     }
 
-    public static List<SObject> update(Object records, Object allOrNoneOrOptions) {
+    public static List<SaveResult> update(Object records, Object allOrNoneOrOptions) {
         return update(records);
     }
 
-    public static List<SObject> delete(Object records) {
+    public static List<DeleteResult> delete(Object records) {
         List<SObject> r = asList(records);
         gateway.delete(r);
-        return r;
+        return filled(r.size(), DeleteResult::new);
     }
 
-    public static List<SObject> delete(Object records, Object allOrNoneOrOptions) {
+    public static List<DeleteResult> delete(Object records, Object allOrNoneOrOptions) {
         return delete(records);
     }
 
-    public static List<SObject> upsert(Object records) {
+    public static List<UpsertResult> upsert(Object records) {
         List<SObject> r = asList(records);
         gateway.upsert(r);
-        return r;
+        return filled(r.size(), UpsertResult::new);
     }
 
-    public static List<SObject> upsert(Object records, Object externalIdField) {
+    public static List<UpsertResult> upsert(Object records, Object externalIdField) {
         return upsert(records);
     }
 
-    public static List<SObject> upsert(Object records, Object externalIdField, Object allOrNone) {
+    public static List<UpsertResult> upsert(Object records, Object externalIdField, Object allOrNone) {
         return upsert(records);
+    }
+
+    private static <T> List<T> filled(int n, java.util.function.Supplier<T> make) {
+        List<T> out = new List<>();
+        for (int i = 0; i < n; i++) out.add(make.get());
+        return out;
     }
 
     /** Local has no transaction boundary; savepoint/rollback are stubs. */
@@ -92,5 +98,51 @@ public final class Database {
         List<SObject> one = new List<>();
         one.add((SObject) records);
         return one;
+    }
+
+    /**
+     * Per-row DML outcome (Database.SaveResult / UpsertResult / DeleteResult). The shared
+     * accessors are recognized so error-handling code type-checks; the local run processes the
+     * records but doesn't model per-row success/errors yet, so reading one fails clearly.
+     */
+    public abstract static class DmlResult {
+        public boolean isSuccess() {
+            throw Unsupported.notLocal("Database result inspection (isSuccess)");
+        }
+
+        public String getId() {
+            throw Unsupported.notLocal("Database result inspection (getId)");
+        }
+
+        public List<Error> getErrors() {
+            throw Unsupported.notLocal("Database result inspection (getErrors)");
+        }
+    }
+
+    public static final class SaveResult extends DmlResult {
+    }
+
+    public static final class DeleteResult extends DmlResult {
+    }
+
+    public static final class UpsertResult extends DmlResult {
+        public boolean isCreated() {
+            throw Unsupported.notLocal("Database result inspection (isCreated)");
+        }
+    }
+
+    /** A single error attached to a DML result (Database.Error). */
+    public static final class Error {
+        public String getMessage() {
+            throw Unsupported.notLocal("Database.Error.getMessage()");
+        }
+
+        public String getStatusCode() {
+            throw Unsupported.notLocal("Database.Error.getStatusCode()");
+        }
+
+        public List<String> getFields() {
+            throw Unsupported.notLocal("Database.Error.getFields()");
+        }
     }
 }
