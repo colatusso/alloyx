@@ -133,6 +133,13 @@ final class Transpiler {
     // class name -> (lowercase field -> canonical field), so a qualified field access
     // resolves case-insensitively (Apex: incomingItem.Name == incomingItem.name)
     private final java.util.Map<String, java.util.Map<String, String>> memberIndex;
+    // class name -> (lowercase member -> declared Apex type): fields, method return types and
+    // param types of the class being transpiled (+ inners), so the central typer can type a
+    // same-class field read / method call and coerce a Decimal-param argument.
+    private final java.util.Map<String, java.util.Map<String, String>> memberTypes = new java.util.HashMap<>();
+    // the one source of truth for static expression typing (see ExprTyper); shares this
+    // Transpiler's live locals map and a view of the current class body's fields.
+    private final ExprTyper typer;
 
     private Transpiler(Set<String> userClasses, SchemaProvider schema, Set<String> typedSObjects,
                        java.util.Map<String, java.util.Map<String, String>> memberIndex) {
@@ -140,6 +147,8 @@ final class Transpiler {
         this.schema = schema;
         this.typedSObjects = typedSObjects;
         this.memberIndex = memberIndex;
+        this.typer = new ExprTyper(schema, typedSObjects, userClasses, innerTypes, memberTypes,
+            locals, () -> fieldTypes);
     }
 
     private boolean isSObject(Expr e) {
@@ -221,6 +230,7 @@ final class Transpiler {
 
     private Result emitClass(ClassDecl cls) {
         registerInnerTypes(cls);
+        indexMemberTypes(cls);
         StringBuilder sb = new StringBuilder();
         sb.append(IMPORTS).append("\n\n");
         // the Apex->Java generics bridging (raw/Object casts) is intentional; hide the
@@ -259,6 +269,51 @@ final class Transpiler {
         }
     }
 
+    // Index each class's members (fields + method return types + param types) by lowercase
+    // name, keyed by class simple name, so the central typer can type a same-class field read
+    // / method call and coerce a Decimal-param call argument. Recurses into inners (indexed by
+    // simple name, matched as Outer.Inner too). Param types use a `(name)` key to avoid
+    // colliding with a same-named field/method; the lookup the typer needs is the return type.
+    private void indexMemberTypes(ClassDecl cls) {
+        java.util.Map<String, String> m =
+            memberTypes.computeIfAbsent(cls.name(), k -> new java.util.HashMap<>());
+        for (Field f : cls.fields()) {
+            m.putIfAbsent(f.name().toLowerCase(java.util.Locale.ROOT), f.type());
+        }
+        for (MethodDecl md : cls.methods()) {
+            String mn = md.name().toLowerCase(java.util.Locale.ROOT);
+            // ctor has no return type; skip so `new Foo()` typing stays via New
+            if (!md.name().equals(cls.name())) {
+                m.putIfAbsent(mn, md.returnType());
+            }
+            // params keyed by position so a call site can recover the declared param type
+            for (int i = 0; i < md.params().size(); i++) {
+                m.putIfAbsent("(" + mn + ")#" + i, md.params().get(i).type());
+            }
+        }
+        for (ClassDecl inner : cls.inners()) indexMemberTypes(inner);
+    }
+
+    // The declared Apex type of param #index of a bare same-class method (by lowercase method
+    // name), or null. Lets the call site coerce a Decimal-typed argument (Apex widens Integer
+    // -> Decimal; Java needs it explicit).
+    private String paramTypeOf(String method, int index) {
+        return paramTypeOf(typer.currentClass, method, index);
+    }
+
+    // Same, but for a method on a known user class (e.g. an explicit `obj.m(...)` where obj's
+    // static type is in our member index). Unknown class/method -> null (no coercion).
+    private String paramTypeOf(String klass, String method, int index) {
+        if (klass == null) {
+            return null;
+        }
+        java.util.Map<String, String> m = memberTypes.get(base(klass));
+        if (m == null && base(klass).contains(".")) {
+            m = memberTypes.get(base(klass).substring(base(klass).lastIndexOf('.') + 1));
+        }
+        return m == null ? null : m.get("(" + method.toLowerCase(java.util.Locale.ROOT) + ")#" + index);
+    }
+
     // Emit a class body from its header onward at the given indent. The caller writes the
     // leading "public "/"static " modifier. `outerStatics` are the enclosing class's static
     // fields, visible to an inner class (which, like a Java static nested class, sees only
@@ -276,6 +331,8 @@ final class Transpiler {
         java.util.Map<String, String> myFields = new java.util.LinkedHashMap<>(outerStatics);
         for (Field f : cls.fields()) myFields.put(f.name(), f.type());
         this.fieldTypes = myFields;
+        String prevClass = typer.currentClass;
+        typer.currentClass = cls.name(); // `this`-rooted member typing resolves against this body
 
         sb.append(iface ? "interface " : "class ").append(cls.name());
         sb.append(emitTypeRelations(cls, iface));
@@ -363,6 +420,7 @@ final class Transpiler {
 
         sb.append(indent).append("}\n");
         this.fieldTypes = myFields; // restore this body's view for any trailing use
+        typer.currentClass = prevClass;
     }
 
     // --- statements
@@ -574,7 +632,7 @@ final class Transpiler {
             case Binary b -> emitBinary(b);
             case Ternary t -> "(" + emitExpr(t.cond()) + " ? " + emitExpr(t.then())
                 + " : " + emitExpr(t.els()) + ")";
-            case Call c -> mapCallee(c.callee()) + "(" + emitArgs(c.args()) + ")";
+            case Call c -> mapCallee(c.callee()) + "(" + emitCallArgs(c.callee(), c.args()) + ")";
             case New nw -> emitNew(nw);
             case ArrayNew a -> "new " + mapType("List<" + a.elementType() + ">")
                 + "(java.util.Arrays.asList(new " + mapType(a.elementType())
@@ -724,7 +782,19 @@ final class Transpiler {
             return "Strings." + name + "(" + emitExpr(mc.target())
                 + (args.isEmpty() ? "" : ", " + args) + ")";
         }
-        return emitExpr(mc.target()) + "." + name + "(" + emitArgs(mc.args()) + ")";
+        // a method on a known user-class instance: coerce an Integer arg into a Decimal param
+        // (Apex widens). The target's static type drives the param lookup; unknown -> unchanged.
+        String args = emitMethodArgs(typer.typeOf(mc.target()), name, mc.args());
+        return emitExpr(mc.target()) + "." + name + "(" + args + ")";
+    }
+
+    // emitArgs, coercing each Integer arg into the declared param type of `klass.method`.
+    private String emitMethodArgs(String klass, String method, List<Expr> args) {
+        List<String> out = new ArrayList<>();
+        for (int i = 0; i < args.size(); i++) {
+            out.add(coerceDecimal(paramTypeOf(klass, method, i), args.get(i)));
+        }
+        return String.join(", ", out);
     }
 
     private static String lowerFirst(String s) {
@@ -769,29 +839,17 @@ final class Transpiler {
 
     private static final Set<String> ARITH = Set.of("+", "-", "*", "/");
 
-    // a String-typed operand (so '+' is concatenation, never Decimal arithmetic)
+    // Thin wrappers over the central typer (ExprTyper) — the ONE source of truth for static
+    // expression typing. Behavior is identical to before where typing was already correct, and
+    // the typer's null/unknown answer falls through to the same default emission as before.
+
+    /** a String-typed operand (so '+' is concatenation, never Decimal arithmetic) */
     private boolean isString(Expr e) {
-        return switch (e) {
-            case Str ignored -> true;
-            case Name n -> locals.containsKey(n.ident()) && mapType(locals.get(n.ident())).equals("String");
-            case Binary b -> b.op().equals("+") && (isString(b.left()) || isString(b.right()));
-            default -> false;
-        };
+        return typer.isString(e);
     }
 
     private boolean isDecimal(Expr e) {
-        return switch (e) {
-            case DecimalLit ignored -> true;
-            case Name n -> locals.containsKey(n.ident()) && mapType(locals.get(n.ident())).equals("Decimal");
-            case Cast c -> mapType(c.type()).equals("Decimal");
-            case Prop p -> {
-                String obj = sObjectTypeOf(p.target());
-                yield obj != null && "Decimal".equals(schema.fieldType(obj, p.name()));
-            }
-            case Binary b -> ARITH.contains(b.op()) && !isString(b.left()) && !isString(b.right())
-                && (isDecimal(b.left()) || isDecimal(b.right()));
-            default -> false;
-        };
+        return typer.isDecimal(e);
     }
 
     private String decimalOperand(Expr e) {
@@ -802,18 +860,14 @@ final class Transpiler {
     // expected type is Decimal and the value is an Integer, wrap it so the assignment/return
     // type-checks. Everywhere else the value is emitted unchanged (no behavior change).
     private String coerceDecimal(String expectedApexType, Expr value) {
-        if (expectedApexType != null && mapType(expectedApexType).equals("Decimal") && isIntegerExpr(value)) {
+        if (typer.needsDecimalWiden(expectedApexType, value)) {
             return "Decimal.valueOf(" + emitExpr(value) + ")";
         }
         return emitExpr(value);
     }
 
     private boolean isIntegerExpr(Expr e) {
-        return switch (e) {
-            case Num ignored -> true; // integer literal (DecimalLit is separate)
-            case Name n -> locals.containsKey(n.ident()) && mapType(locals.get(n.ident())).equals("Integer");
-            default -> false;
-        };
+        return typer.isInteger(e);
     }
 
     private String emitBinary(Binary b) {
@@ -827,7 +881,9 @@ final class Transpiler {
                 case "+" -> left + ".add(" + right + ")";
                 case "-" -> left + ".subtract(" + right + ")";
                 case "*" -> left + ".multiply(" + right + ")";
-                default -> left + ".divide(" + right + ", 8, java.math.RoundingMode.HALF_UP)";
+                // Apex's default division rounding is HALF_EVEN (matches the runtime Decimal's
+                // documented DEFAULT_ROUNDING); scale stays 8.
+                default -> left + ".divide(" + right + ", 8, java.math.RoundingMode.HALF_EVEN)";
             };
         }
         String l = emitExpr(b.left());
@@ -874,20 +930,37 @@ final class Transpiler {
         return String.join(", ", out);
     }
 
+    // Like emitArgs, but for a bare same-class method call: coerce an Integer argument into a
+    // Decimal where the declared parameter is Decimal (Apex widens; Java needs the conversion).
+    // The callee param types come from the current class's member index; an unknown callee
+    // (qualified/built-in) finds nothing and emits each arg unchanged — no behavior change.
+    private String emitCallArgs(String callee, List<Expr> args) {
+        List<String> out = new ArrayList<>();
+        for (int i = 0; i < args.size(); i++) {
+            out.add(coerceDecimal(paramTypeOf(callee, i), args.get(i)));
+        }
+        return String.join(", ", out);
+    }
+
     private String emitSObject(SObjectLit so) {
         String base = base(so.type());
         if (isTyped(base)) {
-            // typed: new Account(Name=x) -> new Account(){{ setName(x); }} (setters type-check)
+            // typed: new Account(Name=x) -> new Account(){{ setName(x); }} (setters type-check).
+            // Coerce an Integer literal into a Decimal field's type the same way an assignment
+            // does, so `new Opportunity(Amount = 5)` feeds the BigDecimal setter, not an int.
             StringBuilder sb = new StringBuilder("new ").append(base).append("(){{");
             for (FieldInit f : so.fields()) {
                 sb.append(" set").append(schema.canonicalField(base, f.name())).append('(')
-                  .append(emitExpr(f.value())).append(");");
+                  .append(coerceDecimal(schema.fieldType(base, f.name()), f.value())).append(");");
             }
             return sb.append(" }}").toString();
         }
+        // untyped/dynamic SObject: values are stored as Object, but still widen an Integer into
+        // a Decimal field so the stored value's runtime type matches Apex (a Decimal, not an int).
         StringBuilder sb = new StringBuilder("new SObject(\"").append(base).append('"');
         for (FieldInit f : so.fields()) {
-            sb.append(", \"").append(f.name()).append("\", ").append(emitExpr(f.value()));
+            sb.append(", \"").append(f.name()).append("\", ")
+              .append(coerceDecimal(schema.fieldType(base, f.name()), f.value()));
         }
         return sb.append(')').toString();
     }
