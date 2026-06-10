@@ -55,8 +55,12 @@ final class Parser {
         return toks.get(i++);
     }
 
+    // Apex is case-insensitive: keyword/punctuation comparisons ignore case. This is
+    // the single normalization point — `at`/`accept`/`expect` and the few direct value
+    // comparisons funnel through equalsIgnoreCase. Identifier TEXT is never touched: it
+    // always reaches the AST via advance().value(), preserving the source's original case.
     private boolean at(String value) {
-        return peek().value().equals(value);
+        return peek().value().equalsIgnoreCase(value);
     }
 
     private boolean isIdent() {
@@ -66,8 +70,8 @@ final class Parser {
     // could this token begin a unary operand right after a cast's closing ')'
     private boolean startsOperand(Token t) {
         if (t.kind().equals("NUMBER") || t.kind().equals("STRING")) return true;
-        if (t.value().equals("(") || t.value().equals("new")) return true;
-        return t.kind().equals("IDENT") && !t.value().equals("instanceof");
+        if (t.value().equals("(") || t.value().equalsIgnoreCase("new")) return true;
+        return t.kind().equals("IDENT") && !t.value().equalsIgnoreCase("instanceof");
     }
 
     private boolean accept(String value) {
@@ -80,7 +84,7 @@ final class Parser {
 
     private Token expect(String value) {
         Token t = advance();
-        if (!t.value().equals(value)) {
+        if (!t.value().equalsIgnoreCase(value)) {
             throw new RuntimeException(
                 "expected '" + value + "' but got '" + t.value() + "' (" + lineOf(t) + ")");
         }
@@ -216,6 +220,16 @@ final class Parser {
         return lt >= 0 ? type.substring(0, lt) : type;
     }
 
+    // first position of a keyword among captured member words, case-insensitively
+    // (Apex modifiers/keywords may be written Static, PUBLIC, Class, …). Compares only;
+    // the words themselves keep their original case for the AST.
+    private static int kwIndex(List<String> words, String keyword) {
+        for (int k = 0; k < words.size(); k++) {
+            if (words.get(k).equalsIgnoreCase(keyword)) return k;
+        }
+        return -1;
+    }
+
     private Object parseMember(String className) {
         List<String> anns = parseAnnotations();
         int memberStart = peek().start();
@@ -235,7 +249,7 @@ final class Parser {
             parts.add(word.toString());
         }
         String name = parts.get(parts.size() - 1);
-        boolean isStatic = parts.subList(0, parts.size() - 1).contains("static");
+        boolean isStatic = kwIndex(parts.subList(0, parts.size() - 1), "static") >= 0;
         String returnType = parts.size() >= 2 ? parts.get(parts.size() - 2) : "void";
 
         if (at("(")) { // method or constructor
@@ -259,19 +273,22 @@ final class Parser {
             // a nested type is parsed (not discarded): the cursor is at its body's '{', and
             // the keyword/name were captured among `parts` (... class|interface Name [extends
             // Super] [implements ...]). An inner enum reads its constant list separately.
-            if (parts.contains("enum")) {
-                return parseEnumBody(parts.get(parts.indexOf("enum") + 1));
+            int enumAt = kwIndex(parts, "enum");
+            if (enumAt >= 0) {
+                return parseEnumBody(parts.get(enumAt + 1));
             }
-            if (parts.contains("class") || parts.contains("interface")) {
-                String kw = parts.contains("interface") ? "interface" : "class";
-                String innerName = parts.get(parts.indexOf(kw) + 1);
-                String sup = parts.contains("extends")
-                    ? parts.get(parts.indexOf("extends") + 1) : null;
+            int ifaceAt = kwIndex(parts, "interface");
+            int classAt = kwIndex(parts, "class");
+            if (classAt >= 0 || ifaceAt >= 0) {
+                String kw = ifaceAt >= 0 ? "interface" : "class";
+                String innerName = parts.get((ifaceAt >= 0 ? ifaceAt : classAt) + 1);
+                int extAt = kwIndex(parts, "extends");
+                String sup = extAt >= 0 ? parts.get(extAt + 1) : null;
                 // capture the inner type's interfaces too (was dropped, so an inner
                 // `class X implements Y` lost the `implements Y` and didn't satisfy Y).
                 // modifiers/keyword/name/extends/implements all arrived in `parts`.
                 List<String> innerInterfaces = new ArrayList<>();
-                int implAt = parts.indexOf("implements");
+                int implAt = kwIndex(parts, "implements");
                 if (implAt >= 0) {
                     for (int k = implAt + 1; k < parts.size(); k++) {
                         innerInterfaces.add(base(parts.get(k)));
@@ -346,7 +363,9 @@ final class Parser {
     }
 
     private Stmt parseStmtInner() {
-        String kw = peek().value();
+        // case-insensitive keyword dispatch: Apex `RETURN`, `IF`, `Insert` are keywords.
+        // The DML op is emitted lowercased (Database.insert) since the runtime methods are.
+        String kw = peek().value().toLowerCase(java.util.Locale.ROOT);
         if (kw.equals("{")) return new GuardedBlock(null, parseBlock());
         if (kw.equals("return")) {
             advance();
@@ -686,19 +705,21 @@ final class Parser {
             expect(")");
             return e;
         }
-        if (t.value().equals("new")) return parseNew();
+        if (t.value().equalsIgnoreCase("new")) return parseNew();
         if (t.kind().equals("IDENT")) {
-            if (t.value().equals("true") || t.value().equals("false")) {
+            // case-insensitive keyword literals (TRUE/False/NULL); the canonical Java
+            // literal is emitted, the source token's case is irrelevant past this point
+            if (t.value().equalsIgnoreCase("true") || t.value().equalsIgnoreCase("false")) {
                 advance();
-                return new Bool(t.value().equals("true"));
+                return new Bool(t.value().equalsIgnoreCase("true"));
             }
-            if (t.value().equals("null")) {
+            if (t.value().equalsIgnoreCase("null")) {
                 advance();
                 return new Null();
             }
             String id = advance().value();
             // type literal: Foo.class
-            if (at(".") && peek(1).value().equals("class")) {
+            if (at(".") && peek(1).value().equalsIgnoreCase("class")) {
                 advance();
                 advance();
                 return new ClassLit(id);
@@ -707,7 +728,7 @@ final class Parser {
             if (at("<")) {
                 int g = i;
                 String generic = consumeGeneric();
-                if (at(".") && peek(1).value().equals("class")) {
+                if (at(".") && peek(1).value().equalsIgnoreCase("class")) {
                     advance();
                     advance();
                     return new ClassLit(id + generic);
@@ -762,7 +783,7 @@ final class Parser {
         String base = type;
         int lt = base.indexOf('<');
         if (lt >= 0) base = base.substring(0, lt);
-        boolean isMap = base.equals("Map");
+        boolean isMap = base.equalsIgnoreCase("Map"); // Apex: map<> == Map<>
         List<Expr> keys = new ArrayList<>();
         List<Expr> values = new ArrayList<>();
         while (!at("}")) {
