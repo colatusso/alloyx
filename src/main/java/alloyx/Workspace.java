@@ -28,6 +28,9 @@ import javax.tools.ToolProvider;
  * shared classloader. All classes thus run against the same configured org.
  */
 final class Workspace {
+    // Default cache location: CWD-relative, the historical behavior. Real invocations
+    // pass an absolute, project-root-anchored dir (Config.cacheDir); this constant is
+    // the retrocompat fallback for callers/tests that don't (flat layouts still work).
     static final Path CACHE_DIR = Path.of(".apexcache");
 
     // Names that look like a type but never describe to an sObject, so we don't waste a
@@ -44,16 +47,31 @@ final class Workspace {
         }
     }
 
+    // SchemaCache anchored at this run's cache dir. Injecting the absolute schema path
+    // (cacheDir/schema) here keeps SchemaCache ignorant of the project-root walk-up — the
+    // runtime package must not depend on engine classes (Config). Long.MAX_VALUE TTL: the
+    // synced cache only refreshes on demand, matching SchemaCache's own default.
+    private static alloyx.runtime.SchemaCache schemaFor(Path cacheDir) {
+        return new alloyx.runtime.SchemaCache(
+            alloyx.runtime.Database.gateway(), cacheDir.resolve("schema"), Long.MAX_VALUE);
+    }
+
     static Compiled compile(List<Path> clsFiles) throws Exception {
-        return compile(clsFiles, List.of());
+        return compile(clsFiles, List.of(), CACHE_DIR);
+    }
+
+    static Compiled compile(List<Path> clsFiles, List<ClassDecl> extraDecls) throws Exception {
+        return compile(clsFiles, extraDecls, CACHE_DIR);
     }
 
     /**
      * Compile the given .cls files together with extra in-memory classes (e.g. an
      * anonymous-block wrapper for `allx eval`, which has no file on disk). The extra
-     * decls compile and load exactly like the file-backed ones.
+     * decls compile and load exactly like the file-backed ones. {@code cacheDir} is the
+     * project-root-anchored .apexcache (absolute); the SchemaCache reads its synced
+     * schema from {@code cacheDir/schema}, so typing works regardless of the CWD.
      */
-    static Compiled compile(List<Path> clsFiles, List<ClassDecl> extraDecls) throws Exception {
+    static Compiled compile(List<Path> clsFiles, List<ClassDecl> extraDecls, Path cacheDir) throws Exception {
         List<ClassDecl> decls = new ArrayList<>();
         for (Path f : clsFiles) {
             try {
@@ -68,9 +86,9 @@ final class Workspace {
             userClasses.add(d.name());
         }
 
-        Files.createDirectories(CACHE_DIR);
+        Files.createDirectories(cacheDir);
         // schema typing for sObject field access; no org -> describes return null (untyped)
-        var schema = new alloyx.runtime.SchemaCache(alloyx.runtime.Database.gateway());
+        var schema = schemaFor(cacheDir);
 
         // Which referenced sObjects can we type? Only those the schema can describe
         // (synced to cache, or an org is connected). Everything else stays the generic
@@ -87,14 +105,14 @@ final class Workspace {
         // a generated typed class per described sObject (compiled alongside the user classes)
         for (String name : typedSObjects) {
             String src = SObjectClassGen.generate(name, schema.fields(name), typedSObjects);
-            Path javaFile = CACHE_DIR.resolve(name + ".java");
+            Path javaFile = cacheDir.resolve(name + ".java");
             Files.writeString(javaFile, src);
             javaFiles.add(javaFile.toString());
         }
         Map<String, Map<String, String>> memberIdx = memberIndex(decls);
         for (ClassDecl d : decls) {
             Transpiler.Result r = Transpiler.transpile(d, userClasses, schema, typedSObjects, memberIdx);
-            Path javaFile = CACHE_DIR.resolve(d.name() + ".java");
+            Path javaFile = cacheDir.resolve(d.name() + ".java");
             Files.writeString(javaFile, r.source());
             javaFiles.add(javaFile.toString());
         }
@@ -104,15 +122,17 @@ final class Workspace {
             throw new RuntimeException("no system Java compiler available (run on a JDK, not a JRE)");
         }
         String classpath = java.lang.System.getProperty("java.class.path");
-        List<String> args = new ArrayList<>(List.of("-cp", classpath, "-d", CACHE_DIR.toString()));
+        List<String> args = new ArrayList<>(List.of("-cp", classpath, "-d", cacheDir.toString()));
         args.addAll(javaFiles);
         int rc = compiler.run(null, null, null, args.toArray(new String[0]));
         if (rc != 0) {
             throw new RuntimeException("javac failed (see diagnostics above)");
         }
 
+        // toAbsolutePath: the URLClassLoader resolves classes by URL at load time, so a
+        // relative dir would break if the CWD shifts between this compile and the load.
         URLClassLoader loader = new URLClassLoader(
-            new URL[]{CACHE_DIR.toUri().toURL()}, Workspace.class.getClassLoader());
+            new URL[]{cacheDir.toAbsolutePath().toUri().toURL()}, Workspace.class.getClassLoader());
         return new Compiled(loader, decls);
     }
 
@@ -277,12 +297,18 @@ final class Workspace {
      * validated for real.
      */
     static List<Diag> check(Path target) throws Exception {
-        return check(target, null);
+        return check(target, null, CACHE_DIR);
+    }
+
+    static List<Diag> check(Path target, String sourceOverride) throws Exception {
+        return check(target, sourceOverride, CACHE_DIR);
     }
 
     // sourceOverride lets an editor check unsaved buffer contents (passed via stdin) while
     // still using `target` for the class name and the workspace dir (for the known-class index).
-    static List<Diag> check(Path target, String sourceOverride) throws Exception {
+    // cacheDir is the project-root-anchored .apexcache; its /schema subdir is where a synced
+    // schema lives, so sObject fields type correctly no matter the CWD the editor ran us from.
+    static List<Diag> check(Path target, String sourceOverride, Path cacheDir) throws Exception {
         String src = sourceOverride != null ? sourceOverride : Files.readString(target);
         Parser.Parsed parsed;
         try {
@@ -292,8 +318,8 @@ final class Workspace {
         }
         ClassDecl cls = parsed.cls();
 
-        Files.createDirectories(CACHE_DIR);
-        var schema = new alloyx.runtime.SchemaCache(alloyx.runtime.Database.gateway());
+        Files.createDirectories(cacheDir);
+        var schema = schemaFor(cacheDir);
 
         // Compile the open class together with the classes it references DIRECTLY
         // (its superclass + the workspace classes used in its body) — first level
@@ -367,17 +393,34 @@ final class Workspace {
         for (ClassDecl d : decls) {
             userClasses.add(d.name());
         }
-        Set<String> typedSObjects = new LinkedHashSet<>();
+        Set<String> candidateSObjects = new LinkedHashSet<>();
         for (String name : SObjectScan.referenced(decls)) {
             if (!userClasses.contains(name) && !NON_SOBJECT.contains(name)
-                    && !name.endsWith("Exception") && schema.isDescribed(name)) {
+                    && !name.endsWith("Exception")) {
+                candidateSObjects.add(name);
+            }
+        }
+        Set<String> typedSObjects = new LinkedHashSet<>();
+        for (String name : candidateSObjects) {
+            if (schema.isDescribed(name)) {
                 typedSObjects.add(name);
             }
+        }
+        // The code names sObjects but the schema typed none AND no schema is loaded at all
+        // (knownSObjects() == null: no org connected and no synced _global.json). That's the
+        // silent footgun — every field reads as untyped Object, spraying false errors. Warn
+        // once. NOT when a schema is present but a particular object just isn't described
+        // (the lenient path), and never when no sObjects are referenced.
+        if (!candidateSObjects.isEmpty() && typedSObjects.isEmpty()
+                && schema.knownSObjects() == null) {
+            java.lang.System.err.println("warning: no org schema loaded (looked in "
+                + cacheDir.resolve("schema").toAbsolutePath()
+                + ") — run 'allx schema sync' to type sObject fields");
         }
 
         List<String> javaFiles = new ArrayList<>();
         for (String name : typedSObjects) {
-            Path jf = CACHE_DIR.resolve(name + ".java");
+            Path jf = cacheDir.resolve(name + ".java");
             Files.writeString(jf, SObjectClassGen.generate(name, schema.fields(name), typedSObjects));
             javaFiles.add(jf.toString());
         }
@@ -386,7 +429,7 @@ final class Workspace {
         Map<String, Map<String, String>> memberIdx = memberIndex(decls);
         Transpiler.Result r = Transpiler.transpileWithLines(
             cls, userClasses, schema, typedSObjects, parsed.stmtLines(), memberIdx);
-        Path targetJava = CACHE_DIR.resolve(cls.name() + ".java");
+        Path targetJava = cacheDir.resolve(cls.name() + ".java");
         Files.writeString(targetJava, r.source());
         javaFiles.add(targetJava.toString());
         for (ClassDecl d : decls) {
@@ -395,7 +438,7 @@ final class Workspace {
             }
             try {
                 String depSrc = Transpiler.transpile(d, userClasses, schema, typedSObjects, memberIdx).source();
-                Path jf = CACHE_DIR.resolve(d.name() + ".java");
+                Path jf = cacheDir.resolve(d.name() + ".java");
                 Files.writeString(jf, depSrc);
                 javaFiles.add(jf.toString());
             } catch (RuntimeException | StackOverflowError skip) {
@@ -410,7 +453,7 @@ final class Workspace {
         var collected = new javax.tools.DiagnosticCollector<javax.tools.JavaFileObject>();
         var fm = compiler.getStandardFileManager(collected, null, java.nio.charset.StandardCharsets.UTF_8);
         String classpath = java.lang.System.getProperty("java.class.path");
-        List<String> options = List.of("-cp", classpath, "-d", CACHE_DIR.toString());
+        List<String> options = List.of("-cp", classpath, "-d", cacheDir.toString());
         compiler.getTask(null, fm, collected, options, null,
             fm.getJavaFileObjectsFromStrings(javaFiles)).call();
         fm.close();

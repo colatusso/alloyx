@@ -47,7 +47,8 @@ public final class Cli {
         switch (sub) {
             case "sync" -> syncSchema(args);
             case "refresh" -> {
-                Path d = Workspace.CACHE_DIR.resolve("schema");
+                String pathArg = args.length > 2 && !args[2].startsWith("--") ? args[2] : ".";
+                Path d = Config.cacheDir(Path.of(pathArg)).resolve("schema");
                 if (Files.exists(d)) {
                     try (var w = Files.walk(d)) {
                         w.sorted(java.util.Comparator.reverseOrder()).forEach(p -> {
@@ -84,7 +85,10 @@ public final class Cli {
         }
         Path path = Path.of(pathArg);
         connectOrg(org, path);
-        var cache = new alloyx.runtime.SchemaCache(Database.gateway());
+        // anchor to the project root so a later `allx check` (run from the editor's CWD)
+        // finds this synced schema; otherwise sync and check could write/read different dirs.
+        Path schemaDir = Config.cacheDir(path).resolve("schema");
+        var cache = new alloyx.runtime.SchemaCache(Database.gateway(), schemaDir, Long.MAX_VALUE);
         boolean discovered = explicit.isEmpty();
         java.util.Set<String> raw = discovered
             ? Workspace.candidateSObjects(Workspace.clsAt(path))
@@ -127,7 +131,7 @@ public final class Cli {
             synced++;
         }
         java.lang.System.out.println(
-            "\n" + synced + "/" + total + " sObject(s) cached in " + Workspace.CACHE_DIR.resolve("schema")
+            "\n" + synced + "/" + total + " sObject(s) cached in " + schemaDir
                 + " — runs are now typed offline");
     }
 
@@ -180,7 +184,10 @@ public final class Cli {
         String source = stdin
             ? new String(java.lang.System.in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8)
             : null;
-        java.util.List<Workspace.Diag> diags = Workspace.check(target, source);
+        // anchor the cache to the project root (walk up for alloyx.json/.apexcache), not the
+        // raw CWD — the editor invokes us with cwd=dirname(file), which otherwise misses a
+        // synced schema in a nested layout and degrades every sObject to untyped.
+        java.util.List<Workspace.Diag> diags = Workspace.check(target, source, Config.cacheDir(target));
         // disableHtmlEscaping so generics read as <String>, not unicode escapes
         java.lang.System.out.println(
             new com.google.gson.GsonBuilder().disableHtmlEscaping().create().toJson(diags));
@@ -216,7 +223,8 @@ public final class Cli {
 
         // compile the target plus only the sibling classes it references — never the
         // whole folder (a real project's src/classes has hundreds of unrelated .cls)
-        Workspace.Compiled compiled = Workspace.compile(Workspace.resolveDeps(file));
+        Workspace.Compiled compiled =
+            Workspace.compile(Workspace.resolveDeps(file), List.of(), Config.cacheDir(file));
 
         String className = method.contains(".") ? method.substring(0, method.indexOf('.')) : method;
         String methodName = method.contains(".") ? method.substring(method.indexOf('.') + 1) : method;
@@ -290,7 +298,7 @@ public final class Cli {
         }
 
         List<Path> deps = Workspace.resolveDepsForSource(snippet, dir.toAbsolutePath());
-        Workspace.Compiled compiled = Workspace.compile(deps, List.of(scratch));
+        Workspace.Compiled compiled = Workspace.compile(deps, List.of(scratch), Config.cacheDir(dir));
         try {
             compiled.load(scratchClass).getMethod("run").invoke(null);
         } catch (InvocationTargetException ite) {
@@ -343,7 +351,8 @@ public final class Cli {
         }
         connectOrg(org, path);
 
-        Workspace.Compiled compiled = Workspace.compile(Workspace.clsAt(path));
+        Workspace.Compiled compiled =
+            Workspace.compile(Workspace.clsAt(path), List.of(), Config.cacheDir(path));
         int passed = 0;
         int failed = 0;
         for (ClassDecl decl : compiled.classes()) {
