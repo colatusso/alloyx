@@ -1,0 +1,24 @@
+AlloyX
+Copyright (c) 2026 Rafael Colatusso
+
+AlloyX is licensed under more than one license. See LICENSING.md for the
+full, per-component breakdown. In short:
+
+  - Engine (transpiler, parser, lexer, workspace, CLI, schema) is licensed
+    under the GNU Affero General Public License v3.0 only (see LICENSE).
+  - The runtime library (src/main/java/alloyx/runtime/), which the Java
+    generated from your Apex links against, is licensed under the Apache
+    License 2.0 (see src/main/java/alloyx/runtime/LICENSE). This keeps your
+    Apex — and the Java produced from it — free of the engine's copyleft.
+
+Third-party components
+----------------------
+  - Gson (com.google.code.gson:gson) — Apache License 2.0
+
+Trademarks
+----------
+Apex and Salesforce are trademarks of Salesforce, Inc. AlloyX is an
+independent, open-source project — not affiliated with, sponsored by, or
+endorsed by Salesforce. AlloyX uses no Salesforce compiler, runtime, or
+libraries; it is an independent, clean-room reimplementation that runs Apex
+on a standard JVM.

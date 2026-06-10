@@ -118,3 +118,23 @@ It is **not** "run any Apex with 100% fidelity". Triggers (before/after context)
 ## Built on
 
 A small Apex → Java transpiler running on the JVM (Java 21). Shipping as a native binary with an embedded runtime — no JDK to install — *soon*.
+
+## License
+
+AlloyX is open source under a deliberate two-license split:
+
+- **Engine** — the transpiler, parser, CLI and schema (everything under
+  `src/main/java/alloyx/` **except** `runtime/`) — is **AGPL-3.0-only**.
+- **Runtime** (`src/main/java/alloyx/runtime/`), which the Java generated from
+  your Apex links against, is **Apache-2.0** — so your Apex, and the code
+  produced from it, stay yours.
+
+See [LICENSING.md](LICENSING.md) for the rationale and [NOTICE](NOTICE) for
+attributions.
+
+## Trademarks
+
+Apex and Salesforce are trademarks of Salesforce, Inc. AlloyX is an independent,
+open-source project — **not affiliated with, sponsored by, or endorsed by
+Salesforce**. AlloyX uses no Salesforce compiler, runtime, or libraries; it is an
+independent, clean-room reimplementation that runs Apex on a standard JVM.

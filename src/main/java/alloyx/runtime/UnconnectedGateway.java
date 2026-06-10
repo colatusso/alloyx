@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Rafael Colatusso
 package alloyx.runtime;
 
 /** Default gateway: no org wired up. Every org-bound call fails with a clear hint. */
