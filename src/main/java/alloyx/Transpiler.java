@@ -403,6 +403,10 @@ final class Transpiler {
                     // (not var) so an Integer x = a.Name mismatch is a compile error
                     sb.append(indent).append(mapType(v.type())).append(' ').append(v.name())
                       .append(" = ").append(emitExpr(v.init())).append(";\n");
+                } else if (mapType(v.type()).equals("Decimal") && isIntegerExpr(v.init())) {
+                    // Apex widens Integer to Decimal; Java needs the explicit conversion
+                    sb.append(indent).append("Decimal ").append(v.name())
+                      .append(" = ").append(coerceDecimal(v.type(), v.init())).append(";\n");
                 } else {
                     sb.append(indent).append("var ").append(v.name())
                       .append(" = ").append(emitExpr(v.init())).append(";\n");
@@ -419,7 +423,7 @@ final class Transpiler {
                         // typed: a.Name = x -> a.setName(x) (javac checks the value's type)
                         sb.append(indent).append(emitExpr(pr.target())).append(".set")
                           .append(schema.canonicalField(parent, pr.name())).append('(')
-                          .append(emitExpr(a.value())).append(");\n");
+                          .append(coerceDecimal(schema.fieldType(parent, pr.name()), a.value())).append(");\n");
                     } else {
                         sb.append(indent).append(emitExpr(pr.target())).append(".put(\"")
                           .append(pr.name()).append("\", ").append(emitExpr(a.value())).append(");\n");
@@ -436,6 +440,11 @@ final class Transpiler {
                     String t = mapType(locals.get(nm.ident()));
                     sb.append(indent).append(nm.ident()).append(" = (").append(t).append(") ")
                       .append(emitExpr(a.value())).append(";\n");
+                } else if (a.target() instanceof Name dnm && locals.containsKey(dnm.ident())
+                        && mapType(locals.get(dnm.ident())).equals("Decimal") && isIntegerExpr(a.value())) {
+                    // Apex widens Integer to Decimal on assignment; Java needs it explicit
+                    sb.append(indent).append(dnm.ident()).append(" = ")
+                      .append(coerceDecimal(locals.get(dnm.ident()), a.value())).append(";\n");
                 } else {
                     sb.append(indent).append(emitExpr(a.target())).append(" = ")
                       .append(emitExpr(a.value())).append(";\n");
@@ -453,7 +462,7 @@ final class Transpiler {
                     // untyped return of an sObject field -> cast Object back to the return type
                     sb.append(" (").append(mapType(currentReturnType)).append(") ").append(emitExpr(r.value()));
                 } else if (r.value() != null) {
-                    sb.append(' ').append(emitExpr(r.value()));
+                    sb.append(' ').append(coerceDecimal(currentReturnType, r.value()));
                 }
                 sb.append(";\n");
             }
@@ -772,6 +781,24 @@ final class Transpiler {
         return isDecimal(e) ? emitExpr(e) : "Decimal.valueOf(" + emitExpr(e) + ")";
     }
 
+    // Apex widens Integer to Decimal implicitly; Java won't (Decimal is a class). Where the
+    // expected type is Decimal and the value is an Integer, wrap it so the assignment/return
+    // type-checks. Everywhere else the value is emitted unchanged (no behavior change).
+    private String coerceDecimal(String expectedApexType, Expr value) {
+        if (expectedApexType != null && mapType(expectedApexType).equals("Decimal") && isIntegerExpr(value)) {
+            return "Decimal.valueOf(" + emitExpr(value) + ")";
+        }
+        return emitExpr(value);
+    }
+
+    private boolean isIntegerExpr(Expr e) {
+        return switch (e) {
+            case Num ignored -> true; // integer literal (DecimalLit is separate)
+            case Name n -> locals.containsKey(n.ident()) && mapType(locals.get(n.ident())).equals("Integer");
+            default -> false;
+        };
+    }
+
     private String emitBinary(Binary b) {
         // Apex Decimal arithmetic -> method calls (BigDecimal has no +/-/*// operators).
         // Guard: if either side is a String, '+' is concatenation, not addition.
@@ -923,8 +950,10 @@ final class Transpiler {
             String generics = mapGenerics(t.substring(lt));
             // Apex List<Object>/Set<Object> accept any List/Set (covariant to Object); Java is
             // invariant, so emit the raw type to mirror Apex's permissiveness (a List<String>
-            // can then be passed where a List<Object> is expected, as in Apex)
-            return generics.equals("<Object>") ? base : base + generics;
+            // can then be passed where a List<Object> is expected, as in Apex).
+            // List<SObject>/Set<SObject> are likewise covariant — any List<Account>/List<Contact>
+            // is accepted where List<SObject> is — so the same raw emission applies.
+            return generics.equals("<Object>") || generics.equals("<SObject>") ? base : base + generics;
         }
         if (innerTypes.contains(base)) { // nested class: emit by its simple Java name
             return base.contains(".") ? base.substring(base.lastIndexOf('.') + 1) : base;
