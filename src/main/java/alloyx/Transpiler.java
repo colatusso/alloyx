@@ -561,9 +561,13 @@ final class Transpiler {
             case Null ignored -> "null";
             case Name n -> canonicalName(n.ident());
             // ++/-- must stay bare: "(++i);" is not a valid Java statement
-            case Unary u -> u.op().equals("++") || u.op().equals("--")
-                ? u.op() + emitExpr(u.operand())
-                : "(" + u.op() + emitExpr(u.operand()) + ")";
+            case Unary u when u.op().equals("++") || u.op().equals("--") ->
+                u.op() + emitExpr(u.operand());
+            // Apex unary -/+ on a Decimal: Java has no operator for the Decimal class,
+            // so -x -> x.negate() and +x -> x (a no-op)
+            case Unary u when (u.op().equals("-") || u.op().equals("+")) && isDecimal(u.operand()) ->
+                u.op().equals("-") ? "(" + emitExpr(u.operand()) + ").negate()" : emitExpr(u.operand());
+            case Unary u -> "(" + u.op() + emitExpr(u.operand()) + ")";
             case Postfix p -> emitExpr(p.operand()) + p.op();
             case Binary b -> emitBinary(b);
             case Ternary t -> "(" + emitExpr(t.cond()) + " ? " + emitExpr(t.then())
