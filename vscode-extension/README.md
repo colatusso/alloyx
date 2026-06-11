@@ -44,34 +44,33 @@ describes the sObjects your classes reference into a local cache, and saves the 
 
 ## How to install
 
-The extension drives the `allx` CLI, so set that up first and make sure a
-**JDK 21+** is installed (AlloyX compiles Java at runtime).
+The extension drives the `allx` CLI — install that first.
 
-**1. Get `allx` on your `PATH`** — see the [main README](../README.md)
-(`./gradlew installDist`, then symlink the launcher).
-
-**2. Install the extension** — from the extension folder:
+**macOS (Homebrew):** one command, the JDK comes along as a dependency:
 
 ```bash
-cd vscode-extension
-npm install          # first time only
-npm run reinstall    # builds the .vsix and installs it into VS Code
+brew install colatusso/alloyx/allx
 ```
 
-Then reload the window: `Cmd/Ctrl+Shift+P` → **Developer: Reload Window**.
+**Windows / Linux:** grab the `allx-*.zip` from the
+[latest release](https://github.com/colatusso/alloyx/releases/latest), unpack it
+anywhere, and either put its `bin/` folder on your `PATH` or set `alloyx.cliPath`
+to the launcher (`bin\allx.bat` on Windows, `bin/allx` on Linux). You also need a
+**JDK 21+** — a JDK, not a JRE ([Temurin 21](https://adoptium.net) works great).
 
-Already have a packaged `.vsix`? Install it directly:
+**Then install this extension** from the Marketplace (search “AlloyX”), or from a
+`.vsix` on the release page:
 
 ```bash
-code --install-extension alloyx-vscode-0.0.1.vsix --force
+code --install-extension alloyx-vscode-0.1.0.vsix
 ```
 
-**3. Point it at your JDK (macOS GUI)** — when VS Code is launched from the
-Dock it doesn't inherit your shell's `JAVA_HOME`, so `allx` can't find the JDK.
-Set it in Settings (example path — use your own):
+**JDK not found? (macOS GUI)** — when VS Code is launched from the Dock it doesn't
+inherit your shell's `JAVA_HOME`. Point the extension at your JDK in Settings
+(brew installs put it under `$(brew --prefix openjdk@21)`):
 
 ```json
-"alloyx.javaHome": "/Users/you/.jdks/jdk-21.0.11+10/Contents/Home"
+"alloyx.javaHome": "/opt/homebrew/opt/openjdk@21"
 ```
 
 ## Settings

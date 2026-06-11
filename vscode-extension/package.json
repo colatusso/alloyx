@@ -2,17 +2,32 @@
   "name": "alloyx-vscode",
   "displayName": "AlloyX",
   "description": "Run Salesforce Apex locally and catch type errors as you type — powered by the allx CLI.",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "publisher": "alloyx",
+  "license": "Apache-2.0",
+  "icon": "icon.png",
+  "preview": true,
   "repository": {
     "type": "git",
     "url": "https://github.com/colatusso/alloyx.git"
+  },
+  "bugs": {
+    "url": "https://github.com/colatusso/alloyx/issues"
   },
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": [
+    "Programming Languages",
+    "Testing",
     "Other"
+  ],
+  "keywords": [
+    "apex",
+    "salesforce",
+    "local development",
+    "soql",
+    "transpiler"
   ],
   "main": "./out/extension.js",
   "activationEvents": [
@@ -88,7 +103,7 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "package": "vsce package --no-dependencies",
-    "reinstall": "vsce package --no-dependencies && code --install-extension alloyx-vscode-0.0.1.vsix --force"
+    "reinstall": "vsce package --no-dependencies && code --install-extension alloyx-vscode-0.1.0.vsix --force"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

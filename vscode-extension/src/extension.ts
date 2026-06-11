@@ -31,6 +31,49 @@ function cliPath(): string {
   return vscode.workspace.getConfiguration("alloyx").get<string>("cliPath", "allx");
 }
 
+// ---------------------------------------------------------------------------
+// Onboarding: the extension is a thin client over the `allx` CLI — without it
+// nothing works, and the failure mode would otherwise be silent (no lenses, no
+// diagnostics). When any CLI spawn fails with ENOENT we tell the user how to
+// install it, once per session, with the right instruction per platform.
+// ---------------------------------------------------------------------------
+const RELEASES_URL = "https://github.com/colatusso/alloyx/releases/latest";
+const BREW_CMD = "brew install colatusso/alloyx/allx";
+let cliMissingShown = false;
+
+function notifyCliMissing(): void {
+  if (cliMissingShown) {
+    return;
+  }
+  cliMissingShown = true;
+  const isMac = process.platform === "darwin";
+  const actions = isMac
+    ? ["Copy brew command", "Open releases", "Set CLI path"]
+    : ["Download CLI", "Set CLI path"];
+  void vscode.window
+    .showWarningMessage(
+      isMac
+        ? `AlloyX needs the allx CLI. Install it with Homebrew: ${BREW_CMD}`
+        : "AlloyX needs the allx CLI. Download the release zip, unpack it and put bin/ on your PATH (or set alloyx.cliPath).",
+      ...actions
+    )
+    .then((pick) => {
+      if (pick === "Copy brew command") {
+        void vscode.env.clipboard.writeText(BREW_CMD);
+        void vscode.window.showInformationMessage("Copied — paste it in a terminal.");
+      } else if (pick === "Open releases" || pick === "Download CLI") {
+        void vscode.env.openExternal(vscode.Uri.parse(RELEASES_URL));
+      } else if (pick === "Set CLI path") {
+        void vscode.commands.executeCommand("workbench.action.openSettings", "alloyx.cliPath");
+      }
+    });
+}
+
+/** Whether this exec error means "the binary itself wasn't found". */
+function isCliMissing(err: unknown): boolean {
+  return !!err && (err as NodeJS.ErrnoException).code === "ENOENT";
+}
+
 /** `--org <alias>` when alloyx.org is set, so a run's SOQL/DML/sObject hits that org. */
 function orgArgs(): string[] {
   const org = vscode.workspace.getConfiguration("alloyx").get<string>("org", "").trim();
@@ -73,6 +116,9 @@ function getOutline(absFile: string): Promise<Outline | undefined> {
       { timeout: 15000, env: execEnv(), cwd: path.dirname(absFile) },
       (err, stdout) => {
         if (err) {
+          if (isCliMissing(err)) {
+            notifyCliMissing();
+          }
           resolve(undefined);
           return;
         }
@@ -137,6 +183,9 @@ function runSnippet(snippet: string, dir: string, label: string): void {
         output.append(stderr);
       }
       if (err && !stdout && !stderr) {
+        if (isCliMissing(err)) {
+          notifyCliMissing();
+        }
         output.appendLine(String(err));
       }
     }
@@ -260,7 +309,12 @@ async function syncSchema(): Promise<void> {
   });
   child.stdout.on("data", (d) => output.append(d.toString()));
   child.stderr.on("data", (d) => output.append(d.toString()));
-  child.on("error", (e) => output.appendLine(String(e)));
+  child.on("error", (e) => {
+    if (isCliMissing(e)) {
+      notifyCliMissing();
+    }
+    output.appendLine(String(e));
+  });
   child.on("close", (code) =>
     output.appendLine(code === 0 ? "✓ schema synced" : `✗ sync exited with ${code}`)
   );
@@ -338,7 +392,10 @@ function checkSource(absFile: string, source: string): Promise<CheckDiag[]> {
       ["check", absFile, "--stdin"],
       // cwd = the file's folder so the synced `.apexcache/schema` is found
       { timeout: 15000, maxBuffer: 8 * 1024 * 1024, env: execEnv(), cwd: path.dirname(absFile) },
-      (_err, stdout) => {
+      (err, stdout) => {
+        if (isCliMissing(err)) {
+          notifyCliMissing();
+        }
         try {
           resolve(JSON.parse(stdout.trim()) as CheckDiag[]);
         } catch {
@@ -447,6 +504,13 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.onDidCloseTextDocument((doc) => {
       diagnostics.delete(doc.uri);
       runBuffers.delete(doc.uri.toString()); // don't leak closed run-buffers
+    }),
+    // the user just pointed at a (new) CLI — allow the missing-CLI hint again
+    // so a still-wrong path keeps guiding instead of failing silently
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration("alloyx.cliPath")) {
+        cliMissingShown = false;
+      }
     })
   );
 
