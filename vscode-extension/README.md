@@ -62,7 +62,7 @@ to the launcher (`bin\allx.bat` on Windows, `bin/allx` on Linux). You also need 
 `.vsix` on the release page:
 
 ```bash
-code --install-extension alloyx-vscode-0.1.0.vsix
+code --install-extension alloyx-vscode-0.1.1.vsix
 ```
 
 **JDK not found? (macOS GUI)** — when VS Code is launched from the Dock it doesn't

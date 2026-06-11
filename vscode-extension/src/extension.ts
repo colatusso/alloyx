@@ -1,5 +1,7 @@
 import * as vscode from "vscode";
 import * as path from "path";
+import * as fs from "fs";
+import * as os from "os";
 import { execFile, spawn } from "child_process";
 
 // ---------------------------------------------------------------------------
@@ -26,9 +28,38 @@ interface Outline {
   methods: OutlineMethod[];
 }
 
-/** Read the configured CLI path (defaults to "allx", resolved via PATH). */
+// Where installers put allx. A GUI-launched VS Code on macOS doesn't inherit the
+// login shell's PATH (and Reload Window doesn't re-capture it), so a fresh
+// `brew install` is invisible to a bare PATH lookup until the app fully restarts.
+// When the setting is the bare default, resolve against these install dirs first.
+const CLI_INSTALL_DIRS = [
+  "/opt/homebrew/bin", // Homebrew, Apple Silicon
+  "/usr/local/bin", // Homebrew, Intel mac / common Linux prefix
+  path.join(os.homedir(), ".local", "bin"),
+];
+
+let resolvedCli: string | undefined;
+
+/**
+ * The CLI to execute. An explicit setting (path or custom name) is used as-is;
+ * the bare default "allx" is resolved to a known install location when one
+ * exists, else left to the process's PATH lookup.
+ */
 function cliPath(): string {
-  return vscode.workspace.getConfiguration("alloyx").get<string>("cliPath", "allx");
+  const configured = vscode.workspace.getConfiguration("alloyx").get<string>("cliPath", "allx");
+  if (configured !== "allx") {
+    return configured;
+  }
+  if (!resolvedCli) {
+    for (const dir of CLI_INSTALL_DIRS) {
+      const candidate = path.join(dir, "allx");
+      if (fs.existsSync(candidate)) {
+        resolvedCli = candidate;
+        break;
+      }
+    }
+  }
+  return resolvedCli ?? configured;
 }
 
 // ---------------------------------------------------------------------------
@@ -510,6 +541,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration("alloyx.cliPath")) {
         cliMissingShown = false;
+        resolvedCli = undefined; // re-resolve install locations on next call
       }
     })
   );
