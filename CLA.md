@@ -19,7 +19,13 @@ agree that:
    your contribution under other terms, **including commercial or proprietary
    licenses**, so AlloyX can be offered under dual licensing.
 
-4. **No obligation.** The project owner is not obligated to use, merge, or keep
+4. **Ownership.** You retain ownership (copyright) of your contribution. Nothing
+   in this agreement transfers copyright to the project owner — what you grant
+   are the **licenses** in clauses 2 and 3. Because those licenses are
+   non-exclusive, you also remain free to use, license, and distribute your own
+   contribution however you like.
+
+5. **No obligation.** The project owner is not obligated to use, merge, or keep
    your contribution.
 
 Without clause 3, a contribution could only ever be used under its inbound
