@@ -184,6 +184,12 @@ final class Transpiler {
     // lambda and fall back to a ternary (see safeNav). Conservative: when in doubt, treat as
     // reassigned (correctness over the single-evaluation property).
     private final Set<String> reassignedLocals = new java.util.HashSet<>();
+    // names of the current method's PARAMS and declared LOCALS (rebuilt per method). A typed sObject
+    // literal lowers to a double-brace init (`new Item__c(){{ setName(name); }}`) where `this` and a
+    // bare field name rebind to the anon subclass; a bare arg-value name that's a current-class FIELD
+    // must be qualified to the enclosing instance — but ONLY when no param/local of this name shadows
+    // it (Apex: a param/local wins over a field). This set is that shadow guard. See qualifyEnclosing.
+    private final Set<String> methodScopeLocals = new java.util.HashSet<>();
     private String currentReturnType = "void";
     // monotonic id for the synthetic lambda parameter that carries an evaluated-once safe-nav
     // target (a?.b -> Safe.nav(a, __sn0 -> __sn0.b)); a counter keeps nested chains' params distinct.
@@ -739,6 +745,11 @@ final class Transpiler {
             for (Param p : m.params()) locals.put(p.name(), qualifyInnerType(p.type()));
             reassignedLocals.clear();
             collectReassigned(m.body(), reassignedLocals);
+            // param + declared-local names of this method: the shadow guard for the typed-literal
+            // arg-value rewrite (a bare field name is qualified only when no local/param shadows it).
+            methodScopeLocals.clear();
+            for (Param p : m.params()) methodScopeLocals.add(p.name());
+            collectDeclaredLocals(m.body(), methodScopeLocals);
             currentReturnType = isCtor ? "void" : m.returnType();
             // an Apex `abstract` method in a class is bodyless: emit `abstract <ret> name(args);`
             // (Java requires no body and rejects an empty `{ }` for a non-void return).
@@ -1427,6 +1438,35 @@ final class Transpiler {
         }
     }
 
+    // Collect every NAME a method body introduces into scope (declared locals + bound names): plain
+    // VarDecls, enhanced-for/for-classic loop vars, and catch params. Plus the method's params (added
+    // by the caller). This is the shadow set for the typed-literal arg-value rewrite: a bare name that
+    // is BOTH a current-class field AND in this set is a param/local that wins, so it stays bare.
+    private static void collectDeclaredLocals(List<Stmt> body, Set<String> out) {
+        for (Stmt s : body) collectDeclaredLocals(s, out);
+    }
+
+    private static void collectDeclaredLocals(Stmt s, Set<String> out) {
+        switch (s) {
+            case VarDecl v -> out.add(v.name());
+            case ForEach fe -> { out.add(fe.name()); collectDeclaredLocals(fe.body(), out); }
+            case For f -> {
+                if (f.init() != null) collectDeclaredLocals(f.init(), out);
+                collectDeclaredLocals(f.body(), out);
+            }
+            case If i -> { collectDeclaredLocals(i.thenBody(), out); collectDeclaredLocals(i.elseBody(), out); }
+            case While w -> collectDeclaredLocals(w.body(), out);
+            case Try t -> {
+                collectDeclaredLocals(t.body(), out);
+                for (Catch c : t.catches()) { out.add(c.name()); collectDeclaredLocals(c.body(), out); }
+                collectDeclaredLocals(t.finallyBody(), out);
+            }
+            case GuardedBlock g -> collectDeclaredLocals(g.body(), out);
+            case Group g -> collectDeclaredLocals(g.stmts(), out);
+            default -> { /* Assign/ExprStmt/Return/Dml/Throw declare no new name */ }
+        }
+    }
+
     // Names referenced (read) by a safe-nav access subtree. For a Prop the name is the parser's
     // member token (always safe); only the call args of a MethodCall can reference captured locals,
     // so we collect bare Name idents recursively from those arg expressions. Used to decide whether
@@ -1586,19 +1626,27 @@ final class Transpiler {
     // expected type is Decimal and the value is an Integer, wrap it so the assignment/return
     // type-checks. Everywhere else the value is emitted unchanged (no behavior change).
     private String coerceDecimal(String expectedApexType, Expr value) {
+        return coerceDecimal(expectedApexType, value, value);
+    }
+
+    // The widen DECISION runs on `typed` (the original expr the typer can type), but the emitted
+    // text comes from `emit` (possibly an enclosing-qualified rewrite of `typed` — see emitSObject).
+    // When the two are identical this is the plain coerce; the split only matters inside a typed
+    // sObject literal where the arg value was rewritten to escape the anon init block's `this`.
+    private String coerceDecimal(String expectedApexType, Expr typed, Expr emit) {
         // a ternary in a Decimal context (Decimal d = c ? 0 : 1): widen PER BRANCH rather than
         // wrap the whole conditional in Decimal.valueOf(Object) — keeps each branch statically
         // typed. emitTernary already widens a mixed Decimal/Integer ternary on its own; this adds
         // the all-Integer case, which only needs widening because the surrounding type is Decimal.
-        if (value instanceof Ternary t && isDecimalType(expectedApexType)) {
-            return "(" + emitExpr(t.cond())
-                + " ? " + coerceDecimal(expectedApexType, t.then())
-                + " : " + coerceDecimal(expectedApexType, t.els()) + ")";
+        if (typed instanceof Ternary t && emit instanceof Ternary et && isDecimalType(expectedApexType)) {
+            return "(" + emitExpr(et.cond())
+                + " ? " + coerceDecimal(expectedApexType, t.then(), et.then())
+                + " : " + coerceDecimal(expectedApexType, t.els(), et.els()) + ")";
         }
-        if (typer.needsDecimalWiden(expectedApexType, value)) {
-            return "Decimal.valueOf(" + emitExpr(value) + ")";
+        if (typer.needsDecimalWiden(expectedApexType, typed)) {
+            return "Decimal.valueOf(" + emitExpr(emit) + ")";
         }
-        return emitExpr(value);
+        return emitExpr(emit);
     }
 
     private boolean isDecimalType(String apexType) {
@@ -1741,16 +1789,82 @@ final class Transpiler {
         return String.join(", ", out);
     }
 
+    // Rewrite an arg-value expression of a TYPED sObject literal so its references to the ENCLOSING
+    // instance survive the double-brace anonymous-subclass init block (where bare `this`/inherited
+    // names rebind to the anon instance):
+    //   - `this` (bare, or rooting `this.field` / `this.m(...)`)  ->  `<EnclosingClass>.this...`
+    //   - a bare name that is a current-class FIELD (and NOT shadowed by a param/local)
+    //                                                            ->  `<EnclosingClass>.this.<name>`
+    // LOCALS and PARAMS stay bare (Java locals can't be shadowed by inherited members; qualifying
+    // them would read the wrong symbol). The qualified form is depth-independent, so the rewrite is
+    // idempotent; it stops at a NESTED typed literal (its own emitSObject re-applies the rewrite to
+    // its own args — no double-qualification). The enclosing class is `typer.currentClass`, which is
+    // the SIMPLE name of the class whose method body is being emitted — and exactly the emitted Java
+    // name (a top-level class, or a static nested `class Inner` for which javac accepts `Inner.this`).
+    private Expr qualifyEnclosing(Expr e) {
+        String cls = typer.currentClass;
+        if (cls == null) {
+            return e; // no enclosing class context (defensive) -> leave untouched
+        }
+        return qualifyEnclosing(e, cls);
+    }
+
+    private Expr qualifyEnclosing(Expr e, String cls) {
+        Expr qualifiedThis = new Name(cls + ".this");
+        return switch (e) {
+            // a NESTED typed literal: leave it — emitSObject rewrites its own args (idempotent either
+            // way, but stopping here keeps the rewrite shallow and avoids re-walking its subtree).
+            case SObjectLit so -> so;
+            // bare `this` as a value, and the `this` rooting `this.field` / `this.m(...)`
+            case Name n when n.ident().equals("this") -> qualifiedThis;
+            // bare field read: qualify only a current-class field that no param/local shadows
+            case Name n when fieldTypes.containsKey(n.ident()) && !methodScopeLocals.contains(n.ident()) ->
+                new Prop(qualifiedThis, n.ident());
+            case Name n -> n;
+            case Prop p -> new Prop(qualifyEnclosing(p.target(), cls), p.name(), p.safe());
+            case MethodCall mc -> new MethodCall(qualifyEnclosing(mc.target(), cls), mc.name(),
+                mapQualify(mc.args(), cls), mc.safe());
+            case Call c -> new Call(c.callee(), mapQualify(c.args(), cls));
+            case New nw -> new New(nw.type(), mapQualify(nw.args(), cls));
+            case Unary u -> new Unary(u.op(), qualifyEnclosing(u.operand(), cls));
+            case Postfix p -> new Postfix(qualifyEnclosing(p.operand(), cls), p.op());
+            case Binary b -> new Binary(b.op(), qualifyEnclosing(b.left(), cls), qualifyEnclosing(b.right(), cls));
+            case Ternary t -> new Ternary(qualifyEnclosing(t.cond(), cls),
+                qualifyEnclosing(t.then(), cls), qualifyEnclosing(t.els(), cls));
+            case Index ix -> new Index(qualifyEnclosing(ix.target(), cls), qualifyEnclosing(ix.index(), cls));
+            case Cast c -> new Cast(c.type(), qualifyEnclosing(c.expr(), cls));
+            case InstanceOf io -> new InstanceOf(qualifyEnclosing(io.expr(), cls), io.type());
+            case ListLit l -> new ListLit(l.type(), mapQualify(l.elements(), cls));
+            case ArrayNew a -> new ArrayNew(a.elementType(), qualifyEnclosing(a.size(), cls));
+            // leaves and shapes with no enclosing-instance refs to lift (Num/Str/Bool/Null/DecimalLit/
+            // ClassLit) and Map/Soql whose own keys/binds can't reference the wrapper's bare fields
+            // through this literal path -> emit unchanged.
+            default -> e;
+        };
+    }
+
+    private List<Expr> mapQualify(List<Expr> args, String cls) {
+        List<Expr> out = new ArrayList<>(args.size());
+        for (Expr a : args) out.add(qualifyEnclosing(a, cls));
+        return out;
+    }
+
     private String emitSObject(SObjectLit so) {
         String base = base(so.type());
         if (isTyped(base)) {
             // typed: new Account(Name=x) -> new Account(){{ setName(x); }} (setters type-check).
             // Coerce an Integer literal into a Decimal field's type the same way an assignment
             // does, so `new Opportunity(Amount = 5)` feeds the BigDecimal setter, not an int.
+            // The init block is an ANONYMOUS subclass of the typed sObject, so inside it `this` and
+            // any bare name that collides with an inherited member (the field-token statics) rebind
+            // to the anon instance — an arg value touching the ENCLOSING instance must be qualified
+            // (<EnclosingClass>.this...). qualifyEnclosing rewrites those refs; the widen decision
+            // still runs on the ORIGINAL expr (the typer can't type the synthetic qualified-this).
             StringBuilder sb = new StringBuilder("new ").append(base).append("(){{");
             for (FieldInit f : so.fields()) {
                 sb.append(" set").append(schema.canonicalField(base, f.name())).append('(')
-                  .append(coerceDecimal(schema.fieldType(base, f.name()), f.value())).append(");");
+                  .append(coerceDecimal(schema.fieldType(base, f.name()),
+                                        f.value(), qualifyEnclosing(f.value()))).append(");");
             }
             return sb.append(" }}").toString();
         }

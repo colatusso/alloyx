@@ -25,24 +25,36 @@ final class SObjectScan {
     static Set<String> referenced(Collection<ClassDecl> decls) {
         Set<String> out = new HashSet<>();
         for (ClassDecl c : decls) {
-            addType(c.superclass(), out);
-            for (Field f : c.fields()) {
-                addType(f.type(), out);
-                walkExpr(f.init(), out);
-            }
-            for (MethodDecl m : c.methods()) {
-                // a constructor has no return type — the parser leaves the modifier
-                // (e.g. "public") in that slot, which is not a type to collect
-                if (!m.name().equals(c.name())) {
-                    addType(m.returnType(), out);
-                }
-                for (Param p : m.params()) {
-                    addType(p.type(), out);
-                }
-                walkBody(m.body(), out);
-            }
+            walkClass(c, out);
         }
         return out;
+    }
+
+    // Collect sObject references from a class AND its nested classes — an sObject named only inside
+    // an inner method (e.g. a wrapper's toSObject building a typed sObject literal) must still be
+    // discovered for describe/typing, exactly as if it appeared in the outer class.
+    private static void walkClass(ClassDecl c, Set<String> out) {
+        addType(c.superclass(), out);
+        for (Field f : c.fields()) {
+            addType(f.type(), out);
+            walkExpr(f.init(), out);
+        }
+        for (MethodDecl m : c.methods()) {
+            // a constructor has no return type — the parser leaves the modifier
+            // (e.g. "public") in that slot, which is not a type to collect
+            if (!m.name().equals(c.name())) {
+                addType(m.returnType(), out);
+            }
+            for (Param p : m.params()) {
+                addType(p.type(), out);
+            }
+            walkBody(m.body(), out);
+        }
+        if (c.inners() != null) {
+            for (ClassDecl inner : c.inners()) {
+                walkClass(inner, out);
+            }
+        }
     }
 
     // pull every identifier out of a type string so "Map<Id, Account>" contributes
