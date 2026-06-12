@@ -27,6 +27,7 @@ final class Transpiler {
 
     private static final String IMPORTS = String.join("\n",
         "import alloyx.runtime.System;",
+        "import alloyx.runtime.Safe;",
         "import alloyx.runtime.List;",
         "import alloyx.runtime.Set;",
         "import alloyx.runtime.Map;",
@@ -170,7 +171,16 @@ final class Transpiler {
     // fieldTypes is swapped per class body (outer vs inner) as emission descends.
     private java.util.Map<String, String> fieldTypes = new java.util.HashMap<>();
     private final java.util.Map<String, String> locals = new java.util.HashMap<>();
+    // names of locals/params reassigned anywhere in the current method body (rebuilt per method).
+    // Java lambdas can only capture effectively-final variables, but Apex reassigns locals freely,
+    // so a safe-nav lowering whose access references a reassigned name must avoid the Safe.nav
+    // lambda and fall back to a ternary (see safeNav). Conservative: when in doubt, treat as
+    // reassigned (correctness over the single-evaluation property).
+    private final Set<String> reassignedLocals = new java.util.HashSet<>();
     private String currentReturnType = "void";
+    // monotonic id for the synthetic lambda parameter that carries an evaluated-once safe-nav
+    // target (a?.b -> Safe.nav(a, __sn0 -> __sn0.b)); a counter keeps nested chains' params distinct.
+    private int safeNavId = 0;
     // inner (nested) class names — both simple (Inner) and qualified (Outer.Inner) —
     // so references resolve as a user type, never the fallback dynamic SObject
     private final Set<String> innerTypes = new java.util.HashSet<>();
@@ -655,6 +665,8 @@ final class Transpiler {
             locals.clear();
             locals.putAll(fieldTypes);
             for (Param p : m.params()) locals.put(p.name(), p.type());
+            reassignedLocals.clear();
+            collectReassigned(m.body(), reassignedLocals);
             currentReturnType = isCtor ? "void" : m.returnType();
             // an Apex `abstract` method in a class is bodyless: emit `abstract <ret> name(args);`
             // (Java requires no body and rejects an empty `{ }` for a non-void return).
@@ -785,7 +797,13 @@ final class Transpiler {
                       .append(emitExpr(a.value())).append(";\n");
                 }
             }
-            case ExprStmt e -> sb.append(indent).append(emitExpr(e.expr())).append(";\n");
+            case ExprStmt e -> {
+                // a safe-nav call as a STATEMENT may be void (obj?.doWork();) — a Function lambda
+                // can't have a void body, so lower it via Safe.run (Consumer) instead of Safe.nav.
+                String expr = e.expr() instanceof MethodCall mc && mc.safe()
+                    ? safeRunCall(mc) : emitExpr(e.expr());
+                sb.append(indent).append(expr).append(";\n");
+            }
             case Return r -> {
                 sb.append(indent).append("return");
                 if (r.value() instanceof Soql) {
@@ -989,11 +1007,75 @@ final class Transpiler {
         if (namespaceRoot(p, "ConnectApi")) {
             return "ConnectApi.unsupported(\"" + escape(dottedTail(p, 1)) + "\")";
         }
-        String access = fieldAccess(p);
-        if (p.safe()) { // Apex a?.b -> (a == null ? null : a.b)
-            return "(" + emitExpr(p.target()) + " == null ? null : " + access + ")";
+        if (p.safe()) { // Apex a?.b -> Safe.nav(a, x -> x.b): a evaluated once, result type inferred
+            // A Prop's member is the access; only the target can carry references, and that's the
+            // safe-nav target itself (always emitted once, never captured) -> no reassignment risk
+            // beyond what the chain root contributes, so no extra refs to inspect here.
+            return safeNav(p.target(), java.util.Set.of(), new Prop(p.target(), p.name()),
+                arg -> fieldAccess(new Prop(arg, p.name())));
         }
-        return access;
+        return fieldAccess(p);
+    }
+
+    // Lower an Apex safe-navigation hop (a?.b / a?.m()) to Safe.nav(<emit a>, __sn -> <access>).
+    // The target is emitted ONCE as the helper's first argument; the access is rebuilt to hang off
+    // a synthetic lambda parameter (a bare Name bound to the target's static type in `locals`, so
+    // typed-getter routing and param coercion still resolve) instead of re-emitting the target.
+    // Single evaluation (no double side effects, no exponential blowup on deep chains), and the
+    // result type is inferred from the lambda body so javac never synthesizes a <nulltype> ternary.
+    //
+    // `accessRefs` are the bare names READ by the access (call args), and `accessForType` is a
+    // non-safe clone of the access used only to type the result. If any referenced name is in the
+    // method's reassigned set, the Safe.nav lambda can't capture it (javac: "must be effectively
+    // final"), so we fall back to a ternary. The fallback re-emits the target (sacrificing single
+    // evaluation ON THIS PATH ONLY) but keeps a TYPED null branch when the type is known, so the
+    // <nulltype>-poisoning the ternary historically caused is still avoided.
+    private String safeNav(Expr target, Set<String> accessRefs, Expr accessForType,
+                           java.util.function.Function<Name, String> access) {
+        return safeNav("nav", target, accessRefs, accessForType, access);
+    }
+
+    // As above, but `helper` selects the runtime entry point: "nav" (Function -> value) for value
+    // position, "run" (Consumer -> no value) for a statement-position call that may be void.
+    private String safeNav(String helper, Expr target, Set<String> accessRefs, Expr accessForType,
+                           java.util.function.Function<Name, String> access) {
+        String targetType = typer.typeOf(target); // may be null (unknown) -> dynamic access path
+        boolean captureUnsafe = false;
+        for (String ref : accessRefs) {
+            if (reassignedLocals.contains(ref)) { captureUnsafe = true; break; }
+        }
+        if (captureUnsafe) {
+            return safeNavTernary(helper, target, targetType, accessForType, access);
+        }
+        String param = "__sn" + safeNavId++;
+        Name arg = new Name(param);
+        String emittedTarget = emitExpr(target);  // emit BEFORE binding param (no self-reference)
+        String prev = locals.put(param, targetType);
+        try {
+            return "Safe." + helper + "(" + emittedTarget + ", " + param + " -> " + access.apply(arg) + ")";
+        } finally {
+            if (prev == null) {
+                locals.remove(param);
+            } else {
+                locals.put(param, prev);
+            }
+        }
+    }
+
+    // Fallback lowering for a VALUE-position safe-nav whose access captures a reassigned local
+    // (lambda capture is illegal in Java). Re-emit the target in BOTH the null test and the access —
+    // this is the one place the single-evaluation property is intentionally given up (the access
+    // references a reassigned name anyway, so the target tends to be a simple local/param, not a
+    // side-effecting call). The null branch carries the mapped Java type as a cast when the result
+    // type is known, so the expression's static type stays the access's type instead of <nulltype>;
+    // an unknown type degrades to a bare `null` (the historical shape, only when nothing better).
+    private String safeNavTernary(String helper, Expr target, String targetType,
+                                  Expr accessForType, java.util.function.Function<Name, String> access) {
+        String emittedTarget = emitExpr(target);
+        String body = safeNavReemit(target, targetType, emittedTarget, access);
+        String resultType = typer.typeOf(accessForType);
+        String nullBranch = resultType == null ? "null" : "(" + mapType(resultType) + ") null";
+        return "((" + emittedTarget + ") == null ? " + nullBranch + " : " + body + ")";
     }
 
     // The leftmost identifier of a Prop/MethodCall chain (a.b.c -> "a"), or null if it
@@ -1097,11 +1179,175 @@ final class Transpiler {
     }
 
     private String emitMethodCall(MethodCall mc) {
-        String call = methodCall(mc);
-        if (mc.safe()) { // Apex a?.m() -> (a == null ? null : a.m())
-            return "(" + emitExpr(mc.target()) + " == null ? null : " + call + ")";
+        // Apex a?.m() in VALUE position -> Safe.nav(a, x -> x.m()). A statement-position call whose
+        // result is discarded (and may be void) is lowered separately via safeRunCall (a Function
+        // lambda can't have a void body); emitStmt routes the ExprStmt case there.
+        if (mc.safe()) {
+            // type the result off a NON-safe clone carrying the real target, so typeOf resolves the
+            // method's return type (the typed null branch needs it); refs come from the call args.
+            return safeNav(mc.target(), safeNavCallRefs(mc),
+                new MethodCall(mc.target(), mc.name(), mc.args(), false),
+                arg -> methodCall(new MethodCall(arg, mc.name(), mc.args(), false)));
         }
-        return call;
+        return methodCall(mc);
+    }
+
+    // Bare names read by a safe-nav call's ARGUMENTS (the target is the safe-nav target itself,
+    // never captured): if any is a reassigned local, the Safe.nav lambda can't capture it.
+    private Set<String> safeNavCallRefs(MethodCall mc) {
+        Set<String> refs = new java.util.HashSet<>();
+        for (Expr a : mc.args()) collectRefs(a, refs);
+        return refs;
+    }
+
+    // Statement-position safe-nav call (obj?.doWork();): lower to Safe.run(obj, x -> x.call()).
+    // A Consumer body accepts a void OR value-returning call (the value is discarded), so this is
+    // the one shape the Function-based Safe.nav can't express. Single evaluation, like safeNav.
+    // When a call arg references a reassigned local (lambda capture illegal), fall back to a guarded
+    // `if (target != null) target.call();` statement — valid even when the call is void (a ternary
+    // can't carry a void branch), at the cost of re-emitting the target on this path only.
+    private String safeRunCall(MethodCall mc) {
+        Set<String> refs = safeNavCallRefs(mc);
+        boolean captureUnsafe = false;
+        for (String ref : refs) {
+            if (reassignedLocals.contains(ref)) { captureUnsafe = true; break; }
+        }
+        if (captureUnsafe) {
+            String emittedTarget = emitExpr(mc.target());
+            String targetType = typer.typeOf(mc.target());
+            String body = safeNavReemit(mc.target(), targetType, emittedTarget,
+                arg -> methodCall(new MethodCall(arg, mc.name(), mc.args(), false)));
+            return "if ((" + emittedTarget + ") != null) " + body;
+        }
+        return safeNav("run", mc.target(), refs,
+            new MethodCall(new Name(""), mc.name(), mc.args(), false),
+            arg -> methodCall(new MethodCall(arg, mc.name(), mc.args(), false)));
+    }
+
+    // Re-emit a safe-nav access directly on the target (no synthetic lambda param). When the target
+    // is a bare Name it already carries its type in `locals`, so the access closure resolves
+    // typed-getter routing / param coercion exactly as the lambda path; otherwise we bind a
+    // throwaway param to the target's type, emit, then substitute the parenthesized target text.
+    private String safeNavReemit(Expr target, String targetType, String emittedTarget,
+                                 java.util.function.Function<Name, String> access) {
+        if (target instanceof Name n) {
+            return access.apply(n);
+        }
+        String param = "__sn" + safeNavId++;
+        String prev = locals.put(param, targetType);
+        try {
+            return access.apply(new Name(param)).replace(param, "(" + emittedTarget + ")");
+        } finally {
+            if (prev == null) locals.remove(param); else locals.put(param, prev);
+        }
+    }
+
+    // --- reassigned-locals analysis (one pass over a method body before emitting it)
+
+    // Collect every local/param NAME written after declaration in `body`. The parser desugars
+    // compound assigns (+= etc.) and statement-position ++/-- into Assign(Name, ...), and the
+    // classic for var's update is just an Assign inside For.update, so walking Assign targets that
+    // are bare Names — plus prefix ++/-- (Unary) and postfix ++/-- (Postfix) operand Names found in
+    // any expression — catches them all. Enhanced-for vars are effectively final unless the body
+    // assigns them, which the same Assign walk over the body already covers. Conservative on
+    // purpose: a name landing in this set forces the safe-nav ternary fallback, never miscompiles.
+    private static void collectReassigned(List<Stmt> body, Set<String> out) {
+        for (Stmt s : body) collectReassigned(s, out);
+    }
+
+    private static void collectReassigned(Stmt s, Set<String> out) {
+        switch (s) {
+            case Assign a -> {
+                if (a.target() instanceof Name n) out.add(n.ident());
+                collectReassigned(a.target(), out);
+                collectReassigned(a.value(), out);
+            }
+            case VarDecl v -> { if (v.init() != null) collectReassigned(v.init(), out); }
+            case ExprStmt e -> collectReassigned(e.expr(), out);
+            case Return r -> { if (r.value() != null) collectReassigned(r.value(), out); }
+            case If i -> { collectReassigned(i.cond(), out);
+                collectReassigned(i.thenBody(), out); collectReassigned(i.elseBody(), out); }
+            case While w -> { collectReassigned(w.cond(), out); collectReassigned(w.body(), out); }
+            case ForEach fe -> { collectReassigned(fe.iterable(), out); collectReassigned(fe.body(), out); }
+            case For f -> {
+                if (f.init() != null) collectReassigned(f.init(), out);
+                if (f.cond() != null) collectReassigned(f.cond(), out);
+                if (f.update() != null) collectReassigned(f.update(), out);
+                collectReassigned(f.body(), out);
+            }
+            case Dml d -> collectReassigned(d.value(), out);
+            case Try t -> { collectReassigned(t.body(), out);
+                for (Catch c : t.catches()) collectReassigned(c.body(), out);
+                collectReassigned(t.finallyBody(), out); }
+            case Throw t -> collectReassigned(t.value(), out);
+            case GuardedBlock g -> collectReassigned(g.body(), out);
+            case Group g -> collectReassigned(g.stmts(), out);
+        }
+    }
+
+    // Walk an expression for in-place writes (prefix/postfix ++/-- on a bare Name) and for nested
+    // statements there are none — but expressions can hide writes, so descend through every child.
+    private static void collectReassigned(Expr e, Set<String> out) {
+        if (e == null) return;
+        switch (e) {
+            case Unary u -> {
+                if ((u.op().equals("++") || u.op().equals("--")) && u.operand() instanceof Name n) {
+                    out.add(n.ident());
+                }
+                collectReassigned(u.operand(), out);
+            }
+            case Postfix p -> {
+                if (p.operand() instanceof Name n) out.add(n.ident());
+                collectReassigned(p.operand(), out);
+            }
+            case Binary b -> { collectReassigned(b.left(), out); collectReassigned(b.right(), out); }
+            case Ternary t -> { collectReassigned(t.cond(), out);
+                collectReassigned(t.then(), out); collectReassigned(t.els(), out); }
+            case Call c -> { for (Expr a : c.args()) collectReassigned(a, out); }
+            case New n -> { for (Expr a : n.args()) collectReassigned(a, out); }
+            case ArrayNew a -> collectReassigned(a.size(), out);
+            case SObjectLit so -> { for (FieldInit fi : so.fields()) collectReassigned(fi.value(), out); }
+            case Index ix -> { collectReassigned(ix.target(), out); collectReassigned(ix.index(), out); }
+            case ListLit l -> { for (Expr a : l.elements()) collectReassigned(a, out); }
+            case MapLit m -> { for (Expr a : m.keys()) collectReassigned(a, out);
+                for (Expr a : m.values()) collectReassigned(a, out); }
+            case Prop p -> collectReassigned(p.target(), out);
+            case MethodCall mc -> { collectReassigned(mc.target(), out);
+                for (Expr a : mc.args()) collectReassigned(a, out); }
+            case Cast c -> collectReassigned(c.expr(), out);
+            case InstanceOf io -> collectReassigned(io.expr(), out);
+            case Soql sq -> { for (Bind bd : sq.binds()) collectReassigned(bd.value(), out); }
+            default -> { /* leaf (Num/Str/Bool/Null/Name/DecimalLit/ClassLit): no nested write */ }
+        }
+    }
+
+    // Names referenced (read) by a safe-nav access subtree. For a Prop the name is the parser's
+    // member token (always safe); only the call args of a MethodCall can reference captured locals,
+    // so we collect bare Name idents recursively from those arg expressions. Used to decide whether
+    // any referenced ident is reassigned (forcing the ternary fallback over the Safe.nav lambda).
+    private static void collectRefs(Expr e, Set<String> out) {
+        if (e == null) return;
+        switch (e) {
+            case Name n -> out.add(n.ident());
+            case Unary u -> collectRefs(u.operand(), out);
+            case Postfix p -> collectRefs(p.operand(), out);
+            case Binary b -> { collectRefs(b.left(), out); collectRefs(b.right(), out); }
+            case Ternary t -> { collectRefs(t.cond(), out); collectRefs(t.then(), out); collectRefs(t.els(), out); }
+            case Call c -> { for (Expr a : c.args()) collectRefs(a, out); }
+            case New n -> { for (Expr a : n.args()) collectRefs(a, out); }
+            case ArrayNew a -> collectRefs(a.size(), out);
+            case SObjectLit so -> { for (FieldInit fi : so.fields()) collectRefs(fi.value(), out); }
+            case Index ix -> { collectRefs(ix.target(), out); collectRefs(ix.index(), out); }
+            case ListLit l -> { for (Expr a : l.elements()) collectRefs(a, out); }
+            case MapLit m -> { for (Expr a : m.keys()) collectRefs(a, out);
+                for (Expr a : m.values()) collectRefs(a, out); }
+            case Prop p -> collectRefs(p.target(), out);
+            case MethodCall mc -> { collectRefs(mc.target(), out); for (Expr a : mc.args()) collectRefs(a, out); }
+            case Cast c -> collectRefs(c.expr(), out);
+            case InstanceOf io -> collectRefs(io.expr(), out);
+            case Soql sq -> { for (Bind bd : sq.binds()) collectRefs(bd.value(), out); }
+            default -> { /* leaf literal: nothing referenced */ }
+        }
     }
 
     private String methodCall(MethodCall mc) {
