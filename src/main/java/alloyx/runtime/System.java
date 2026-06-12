@@ -46,20 +46,50 @@ public class System {
     }
 
     public static void assertEquals(Object expected, Object actual) {
-        if (!Objects.equals(expected, actual)) {
+        if (!apexEquals(expected, actual)) {
             throw new AssertException("Assertion Failed: Expected: " + expected + ", Actual: " + actual);
         }
     }
 
     public static void assertEquals(Object expected, Object actual, String message) {
-        if (!Objects.equals(expected, actual)) {
+        if (!apexEquals(expected, actual)) {
             throw new AssertException(message);
         }
     }
 
     public static void assertNotEquals(Object a, Object b) {
-        if (Objects.equals(a, b)) {
+        if (apexEquals(a, b)) {
             throw new AssertException("Assertion Failed: Same value: " + a);
         }
+    }
+
+    /**
+     * Apex value equality for assert comparisons: like {@link Objects#equals} but
+     * reconciling numeric types by VALUE, the way Apex does. Apex has no Integer/Decimal
+     * distinction at the equality level — {@code 3 == 3.0} and {@code Assert.areEqual(3,
+     * someDecimal3)} both hold — but in Java an {@code Integer} and a {@code Decimal}
+     * (a {@code BigDecimal}) never {@code .equals} each other (different classes, and
+     * BigDecimal.equals is scale-sensitive). So when both sides are numbers we compare by
+     * magnitude via BigDecimal.compareTo (scale-insensitive); everything else falls back
+     * to Objects.equals. Shared by Assert (which delegates here) so the two never diverge.
+     */
+    static boolean apexEquals(Object a, Object b) {
+        if (a instanceof Number na && b instanceof Number nb) {
+            return toBigDecimal(na).compareTo(toBigDecimal(nb)) == 0;
+        }
+        return Objects.equals(a, b);
+    }
+
+    private static java.math.BigDecimal toBigDecimal(Number n) {
+        if (n instanceof java.math.BigDecimal bd) {
+            return bd;
+        }
+        if (n instanceof java.math.BigInteger bi) {
+            return new java.math.BigDecimal(bi);
+        }
+        if (n instanceof Double || n instanceof Float) {
+            return java.math.BigDecimal.valueOf(n.doubleValue());
+        }
+        return java.math.BigDecimal.valueOf(n.longValue());
     }
 }

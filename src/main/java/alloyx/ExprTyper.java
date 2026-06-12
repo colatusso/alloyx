@@ -179,6 +179,14 @@ final class ExprTyper {
             }
             return null;
         }
+        // a STATIC field-token reference `Item__c.Id`: target is a bare TYPED sObject TYPE name
+        // (not a local/instance) and the member is a described field -> the field token's type,
+        // so a `new List<Schema.SObjectField>{ Item__c.Id, ... }` literal accepts each element.
+        if (p.target() instanceof Name tn && !locals.containsKey(tn.ident())
+                && typedSObjects.contains(tn.ident())
+                && schema.fieldType(tn.ident(), p.name()) != null) {
+            return "Schema.SObjectField";
+        }
         // user-class field via the member type index, keyed by the target's declared class
         String declared = typeOf(p.target());
         return memberType(base(declared), p.name());

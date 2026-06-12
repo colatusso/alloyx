@@ -27,6 +27,7 @@ final class Transpiler {
 
     private static final String IMPORTS = String.join("\n",
         "import alloyx.runtime.System;",
+        "import alloyx.runtime.Assert;",
         "import alloyx.runtime.Safe;",
         "import alloyx.runtime.List;",
         "import alloyx.runtime.Set;",
@@ -44,6 +45,7 @@ final class Transpiler {
         "import alloyx.runtime.Strings;",
         "import alloyx.runtime.Type;",
         "import alloyx.runtime.SObjectType;",
+        "import alloyx.runtime.SObjectField;",
         "import alloyx.runtime.DescribeSObjectResult;",
         "import alloyx.runtime.Pattern;",
         "import alloyx.runtime.Matcher;",
@@ -76,14 +78,15 @@ final class Transpiler {
         Set.of("Integer", "Long", "Boolean", "String", "Object", "Double", "void");
     private static final Set<String> COLLECTIONS = Set.of("List", "Set", "Map");
     // Apex Schema namespace types backed by runtime classes (not dynamic sObjects)
-    private static final Set<String> SCHEMA_TYPES = Set.of("SObjectType", "DescribeSObjectResult");
+    private static final Set<String> SCHEMA_TYPES =
+        Set.of("SObjectType", "DescribeSObjectResult", "SObjectField");
     // native Apex System types backed by runtime classes (not dynamic sObjects). The async/
     // schedulable platform interfaces (Schedulable, Queueable, their contexts) and the sortable/
     // iterable contracts (Comparable, Iterable, Iterator) live here too: they're real Apex
     // interfaces backed by runtime interfaces, so `implements Schedulable` maps to a real Java
     // interface instead of collapsing to the dynamic SObject ("interface expected here").
     private static final Set<String> RUNTIME_TYPES = Set.of("Pattern", "Matcher", "LoggingLevel", "Limits",
-        "Http", "HttpRequest", "HttpResponse", "Blob", "EncodingUtil", "Trigger", "Test",
+        "Http", "HttpRequest", "HttpResponse", "Blob", "EncodingUtil", "Trigger", "Test", "Assert",
         "ApexPages", "PageReference", "AggregateResult",
         "Schedulable", "SchedulableContext", "Queueable", "QueueableContext",
         "Comparable", "Iterable", "Iterator");
@@ -140,7 +143,11 @@ final class Transpiler {
         java.util.Map.entry("list", "List"), java.util.Map.entry("set", "Set"),
         java.util.Map.entry("map", "Map"), java.util.Map.entry("system", "System"),
         java.util.Map.entry("math", "Math"), java.util.Map.entry("database", "Database"),
-        java.util.Map.entry("json", "JSON"), java.util.Map.entry("userinfo", "UserInfo"));
+        java.util.Map.entry("json", "JSON"), java.util.Map.entry("userinfo", "UserInfo"),
+        // Assert is the modern test-assertion class; routed here so a case-insensitive Apex call
+        // (assert.areEqual) folds to the runtime Assert. A user class named Assert shadows it
+        // (guarded above), matching Apex's "your own type wins" precedence.
+        java.util.Map.entry("assert", "Assert"));
 
     private static final Set<String> SCALARS = Set.of("String", "Integer", "Long", "Double",
         "Decimal", "Boolean", "Date", "Datetime", "Time", "Id", "Blob", "Object", "void");
@@ -1189,6 +1196,14 @@ final class Transpiler {
             String m = p.name().toLowerCase(java.util.Locale.ROOT);
             return "Trigger." + TRIGGER_MEMBERS.getOrDefault(m, p.name());
         }
+        // sObject field TOKEN: `Item__c.Id` where Item__c is a TYPED sObject TYPE name (not an
+        // instance, not shadowed by a local/field) -> the static SObjectField token the generated
+        // class now carries. Fold the field to its canonical API name (Item__c.id -> Item__c.Id),
+        // exactly as instance field access folds, so it binds to the emitted `public static final`.
+        String token = staticFieldToken(p);
+        if (token != null) {
+            return token;
+        }
         String parent = sObjectTypeOf(p.target());
         if (parent == null) {
             // not an sObject — resolve the member case-insensitively against the target's
@@ -1219,6 +1234,23 @@ final class Transpiler {
             case "Double" -> "SObject.asDouble(" + get + ")";
             default -> "((" + mapType(ft) + ") " + get + ")";
         };
+    }
+
+    // `Obj__c.Field` as a STATIC field-token reference (Schema.SObjectField), or null when this
+    // Prop isn't that shape. The target must be a bare TYPE name (a typed sObject we generated a
+    // class for), NOT shadowed by a local/param — Apex variables win over types, so a local named
+    // Item__c keeps instance semantics (same locals-precedence guard the static-call path uses).
+    // The member must be a real described field; the token name is the canonical-cased API name so
+    // `Item__c.id` binds to the emitted `public static final SObjectField Id`.
+    private String staticFieldToken(Prop p) {
+        if (!(p.target() instanceof Name tn) || locals.containsKey(tn.ident())) {
+            return null;
+        }
+        String type = tn.ident();
+        if (!typedSObjects.contains(type) || schema.fieldType(type, p.name()) == null) {
+            return null;
+        }
+        return type + "." + schema.canonicalField(type, p.name());
     }
 
     /** The declared (Apex) type of a target we can read cheaply: a local/param, or this.field. */
@@ -1440,7 +1472,12 @@ final class Transpiler {
         }
         // built-in static call (Apex is case-insensitive): canonicalize the type name
         // and lower-case the method's first char so Date.ValueOf -> Date.valueOf, etc.
-        if (mc.target() instanceof Name n) {
+        // A user class (or a local/param/field) of the same name SHADOWS the built-in —
+        // Apex prefers the workspace's own type/variable — so skip this routing and let the
+        // default emission below resolve it to the user symbol (mirrors the locals-precedence
+        // guard the static-call coercion uses). Matters for plausible user names like Assert.
+        if (mc.target() instanceof Name n
+                && !userClasses.contains(n.ident()) && !locals.containsKey(n.ident())) {
             String canon = BUILTINS.get(n.ident().toLowerCase());
             if (canon != null) {
                 // Integer.valueOf(dec) / Long.valueOf(dec): Apex narrows a Decimal; Java's

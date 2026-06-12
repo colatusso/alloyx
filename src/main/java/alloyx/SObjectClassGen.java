@@ -19,6 +19,7 @@ final class SObjectClassGen {
     static String generate(String sobjectType, Map<String, String> fields, Set<String> typed) {
         StringBuilder sb = new StringBuilder();
         sb.append("import alloyx.runtime.SObject;\n");
+        sb.append("import alloyx.runtime.SObjectField;\n");
         sb.append("import alloyx.runtime.List;\n");
         sb.append("import alloyx.runtime.Decimal;\n");
         sb.append("import alloyx.runtime.Date;\n");
@@ -46,6 +47,15 @@ final class SObjectClassGen {
         for (Map.Entry<String, String> e : fields.entrySet()) {
             String field = e.getKey();
             String javaType = javaType(e.getValue(), typed);
+            // A static FIELD-TOKEN named exactly like the field's canonical API name, so the
+            // selector pattern `Item__c.Id` resolves to a Schema.SObjectField (its toString() is
+            // the field API name, used to build SOQL column lists). Distinct from the get<Field>/
+            // set<Field> accessors below, and the base SObject declares no member by a field name,
+            // so there's no collision. The Apex type access Item__c.id folds to this canonical
+            // token in the emitter (case-insensitive, like the field accessors).
+            sb.append("    public static final SObjectField ").append(field)
+              .append(" = new SObjectField(\"").append(sobjectType).append("\", \"")
+              .append(field).append("\");\n");
             // typed accessors over the inherited dynamic map (single backing store).
             // Numeric reads go through SObject.asX so a SOQL value that came back as a
             // different numeric runtime type (Integer "100" for a Decimal currency field,

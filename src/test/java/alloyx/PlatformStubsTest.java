@@ -143,6 +143,51 @@ class PlatformStubsTest {
     }
 
     @Test
+    void assertClassRoutesToRuntime_caseInsensitive() throws Exception {
+        // The modern Apex Assert class must route as a static-call target onto the runtime Assert.
+        // Apex is case-insensitive, so `assert.areEqual(...)` (lowercase) must fold to Assert too —
+        // `assert` is a Java keyword, so a literal pass-through wouldn't even compile.
+        String java = transpile("""
+            public class Checks {
+                public static void go() {
+                    Assert.areEqual(1, 1);
+                    assert.areEqual(2, 2);
+                    Assert.isTrue(true);
+                }
+            }
+            """);
+        assertTrue(java.contains("Assert.areEqual(1, 1)"), java);
+        assertTrue(java.contains("Assert.areEqual(2, 2)"), java);   // assert.areEqual folded to Assert
+        assertTrue(java.contains("Assert.isTrue(true)"), java);
+        assertFalse(java.contains("assert.areEqual"), java);        // never the bare keyword form
+    }
+
+    @Test
+    void assertClassRunsEndToEnd() throws Exception {
+        // a full compile+run: the runtime Assert links and its checks behave. Apex CANNOT catch
+        // an assertion failure (it is fatal on the platform), so the probe's catch (Exception)
+        // must NOT swallow it — the failure surfaces to the JAVA caller instead. Integer-vs-
+        // Decimal reconciliation is exercised on the passing checks.
+        Path p = probe("AssertUser", """
+            public class AssertUser {
+                public static String run() {
+                    Assert.areEqual(3, 3);
+                    Decimal d = 3;
+                    Assert.areEqual(3, d);
+                    try { Assert.areEqual(1, 2); return 'NO-THROW'; }
+                    catch (Exception e) { return 'caught-but-should-not'; }
+                }
+            }
+            """);
+        Class<?> c = Workspace.compile(List.of(p)).load("AssertUser");
+        var thrown = org.junit.jupiter.api.Assertions.assertThrows(
+            java.lang.reflect.InvocationTargetException.class,
+            () -> c.getMethod("run").invoke(null));
+        assertTrue(thrown.getCause() instanceof alloyx.runtime.AssertException,
+            "assert failure must escape the Apex catch (fatal on platform), got " + thrown.getCause());
+    }
+
+    @Test
     void schemaAccessPatternsCompile() throws Exception {
         // Schema.getGlobalDescribe() and the Schema.SObjectType.<Name> describe chain type-check.
         Path p = probe("Describer", """

@@ -176,7 +176,17 @@ final class SObjectScan {
                 walkArgs(mp.keys(), out);
                 walkArgs(mp.values(), out);
             }
-            case Prop p -> walkExpr(p.target(), out);
+            case Prop p -> {
+                // a bare-Name target of a member access can be a STATIC field-token reference on an
+                // sObject TYPE (the selector pattern Item__c.Id -> Schema.SObjectField). Collect the
+                // name as a candidate sObject so the Workspace generates its typed class (which carries
+                // the static tokens). Over-collection is fine: a non-describable name is dropped.
+                if (p.target() instanceof Name n
+                        && !n.ident().equals("this") && !n.ident().equals("super")) {
+                    out.add(n.ident());
+                }
+                walkExpr(p.target(), out);
+            }
             case MethodCall mc -> {
                 walkExpr(mc.target(), out);
                 walkArgs(mc.args(), out);

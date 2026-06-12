@@ -39,7 +39,7 @@ final class Workspace {
         "List", "Set", "Map", "Integer", "Long", "Double", "Boolean", "String", "Object",
         "Decimal", "Date", "Datetime", "Time", "Id", "Blob", "void", "SObject", "System",
         "Math", "Database", "JSON", "UserInfo", "Strings", "Schema", "Test", "Trigger",
-        "Safe", "Exception", "Iterable", "Iterator",
+        "Safe", "Exception", "Iterable", "Iterator", "Assert",
         // platform interfaces backed by runtime types (Schedulable/Queueable + their contexts,
         // Comparable): never describe to an sObject, so don't waste a describe call on them.
         "Schedulable", "SchedulableContext", "Queueable", "QueueableContext", "Comparable");
