@@ -70,7 +70,13 @@ function cliPath(): string {
 // ---------------------------------------------------------------------------
 const RELEASES_URL = "https://github.com/colatusso/alloyx/releases/latest";
 const BREW_CMD = "brew install colatusso/alloyx/allx";
+const BREW_UPGRADE_CMD = "brew upgrade allx";
 let cliMissingShown = false;
+
+// Lowest CLI version this extension is built against. Bumped at release time when
+// the extension starts to rely on a newer CLI feature/output. Warning-only.
+const MIN_CLI_VERSION = "0.1.1";
+let cliOutdatedShown = false;
 
 function notifyCliMissing(): void {
   if (cliMissingShown) {
@@ -103,6 +109,80 @@ function notifyCliMissing(): void {
 /** Whether this exec error means "the binary itself wasn't found". */
 function isCliMissing(err: unknown): boolean {
   return !!err && (err as NodeJS.ErrnoException).code === "ENOENT";
+}
+
+// ---------------------------------------------------------------------------
+// CLI version gate. After the CLI is found, probe `allx --version` once and warn
+// (never block) when it's older than what this extension is built against. An old
+// CLI predates --version, so it prints usage / exits non-zero / has no semver in
+// its output — all treated as outdated. Generic numeric semver comparison only.
+// ---------------------------------------------------------------------------
+
+/** Compare dotted numeric versions. Returns <0, 0, >0 like a comparator. */
+function compareVersions(a: string, b: string): number {
+  const pa = a.split(".").map((n) => parseInt(n, 10));
+  const pb = b.split(".").map((n) => parseInt(n, 10));
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const x = pa[i] ?? 0;
+    const y = pb[i] ?? 0;
+    if (x !== y) {
+      return x - y;
+    }
+  }
+  return 0;
+}
+
+/** First `MAJOR.MINOR.PATCH` in the text, or undefined if there's none. */
+function parseSemver(text: string): string | undefined {
+  return text.match(/\d+\.\d+\.\d+/)?.[0];
+}
+
+/** One-per-session warning that the installed CLI is older than recommended. */
+function notifyCliOutdated(found: string | undefined): void {
+  if (cliOutdatedShown) {
+    return;
+  }
+  cliOutdatedShown = true;
+  const isMac = process.platform === "darwin";
+  const actions = isMac ? ["Copy brew command"] : ["Open releases"];
+  void vscode.window
+    .showWarningMessage(
+      `AlloyX CLI ${found ?? "(unknown)"} is older than the recommended ${MIN_CLI_VERSION}.`,
+      ...actions
+    )
+    .then((pick) => {
+      if (pick === "Copy brew command") {
+        void vscode.env.clipboard.writeText(BREW_UPGRADE_CMD);
+        void vscode.window.showInformationMessage("Copied — paste it in a terminal.");
+      } else if (pick === "Open releases") {
+        void vscode.env.openExternal(vscode.Uri.parse(RELEASES_URL));
+      }
+    });
+}
+
+/**
+ * Probe the resolved CLI's version once. Missing binary is left to the
+ * notifyCliMissing flow (we do nothing here). Anything that isn't a recognizable
+ * semver >= MIN_CLI_VERSION — including a pre-`--version` CLI that errors/prints
+ * usage — is reported as outdated.
+ */
+function checkCliVersion(): void {
+  execFile(
+    cliPath(),
+    ["--version"],
+    { timeout: 15000, env: execEnv() },
+    (err, stdout, stderr) => {
+      if (isCliMissing(err)) {
+        return; // not installed: notifyCliMissing owns that case
+      }
+      const found = parseSemver(`${stdout ?? ""}\n${stderr ?? ""}`);
+      // old CLI: non-zero exit / usage output / no semver at all -> outdated
+      if (!found || compareVersions(found, MIN_CLI_VERSION) < 0) {
+        notifyCliOutdated(found);
+      }
+    }
+  );
 }
 
 /** `--org <alias>` when alloyx.org is set, so a run's SOQL/DML/sObject hits that org. */
@@ -541,10 +621,15 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration("alloyx.cliPath")) {
         cliMissingShown = false;
+        cliOutdatedShown = false; // re-probe the version of the newly pointed-at CLI
         resolvedCli = undefined; // re-resolve install locations on next call
+        checkCliVersion();
       }
     })
   );
+
+  // one-shot CLI version probe (warning only; never blocks anything)
+  checkCliVersion();
 
   // check whatever is already open at activation time
   for (const doc of vscode.workspace.textDocuments) {

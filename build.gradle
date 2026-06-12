@@ -22,6 +22,14 @@ application {
     applicationName = 'allx'
 }
 
+jar {
+    // embed the build version so `allx --version` (read via
+    // getImplementationVersion()) reports it at runtime
+    manifest {
+        attributes 'Implementation-Version': project.version
+    }
+}
+
 tasks.named('test') {
     useJUnitPlatform()
     testLogging {

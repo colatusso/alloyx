@@ -16,6 +16,13 @@ import java.util.List;
 public final class Cli {
     public static void main(String[] args) throws Exception {
         String cmd = args.length > 0 ? args[0] : "";
+        // --version first: print only the version and exit, so a caller (e.g. the IDE
+        // extension) can probe whether the installed CLI is new enough.
+        if (cmd.equals("--version") || cmd.equals("version")) {
+            String v = Cli.class.getPackage().getImplementationVersion();
+            java.lang.System.out.println(v != null ? v : "dev");
+            return;
+        }
         switch (cmd) {
             case "run" -> run(args);
             case "eval" -> eval(args);
@@ -31,7 +38,10 @@ public final class Cli {
                 java.lang.System.err.println(
                     "usage: allx (run <File.cls> --method Class.method [--args v1 v2 ...] "
                         + "| eval (<File>|--stdin) [--dir <classesDir>] "
-                        + "| test <path> | transpile <File.cls> | outline <File.cls>) [--org alias]");
+                        + "| check <File.cls> [--stdin] "
+                        + "| test <path> | transpile <File.cls> | outline <File.cls> "
+                        + "| schema (sync (<path>|--obj A,B) | refresh)) [--org alias] "
+                        + "| --version");
                 java.lang.System.exit(2);
             }
         }
