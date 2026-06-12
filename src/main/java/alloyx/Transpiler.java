@@ -994,42 +994,60 @@ final class Transpiler {
             }
             case If iff -> {
                 sb.append(indent).append("if (").append(emitExpr(iff.cond())).append(") {\n");
-                for (Stmt st : iff.thenBody()) emitStmt(st, indent + "    ", sb);
+                scopedBlock(iff.thenBody(), indent + "    ", sb); // then-branch is its own scope
                 sb.append(indent).append("}");
                 if (!iff.elseBody().isEmpty()) {
                     sb.append(" else {\n");
-                    for (Stmt st : iff.elseBody()) emitStmt(st, indent + "    ", sb);
+                    scopedBlock(iff.elseBody(), indent + "    ", sb); // else-branch is its own scope
                     sb.append(indent).append("}");
                 }
                 sb.append('\n');
             }
             case While w -> {
                 sb.append(indent).append("while (").append(emitExpr(w.cond())).append(") {\n");
-                for (Stmt st : w.body()) emitStmt(st, indent + "    ", sb);
+                scopedBlock(w.body(), indent + "    ", sb);
                 sb.append(indent).append("}\n");
             }
             case ForEach fe -> {
-                locals.put(fe.name(), qualifyInnerType(fe.type()));
-                // for (Account a : <List<SObject>>) -> iterate the re-typed rows. The source is
-                // either a SOQL result or a child-relationship collection (ord.Items__r), both
-                // List<SObject>; .many() re-types each row to the typed loop var (Java is invariant,
-                // so a bare List<SObject> can't bind a typed-sObject loop var directly).
-                // canonical class name for the .many() re-type so a lowercase loop type still links
-                String iterable = isTyped(base(fe.type())) && iterableIsSObjectList(fe.iterable())
-                    ? typedName(base(fe.type())) + ".many(" + emitExpr(fe.iterable()) + ")"
-                    : emitExpr(fe.iterable());
-                sb.append(indent).append("for (").append(mapType(fe.type())).append(' ')
-                  .append(fe.name()).append(" : ").append(iterable).append(") {\n");
-                for (Stmt st : fe.body()) emitStmt(st, indent + "    ", sb);
-                sb.append(indent).append("}\n");
+                // the loop var is scoped to the loop: snapshot BEFORE binding it, restore after the
+                // body, so a `for (Account a : ...)` (or a type-shadowing var) doesn't leak past the
+                // loop. The save/restore wraps the body emission below (the loop var enters `locals`).
+                java.util.Map<String, String> saved = new java.util.HashMap<>(locals);
+                try {
+                    locals.put(fe.name(), qualifyInnerType(fe.type()));
+                    // for (Account a : <List<SObject>>) -> iterate the re-typed rows. The source is
+                    // either a SOQL result or a child-relationship collection (ord.Items__r), both
+                    // List<SObject>; .many() re-types each row to the typed loop var (Java is invariant,
+                    // so a bare List<SObject> can't bind a typed-sObject loop var directly).
+                    // canonical class name for the .many() re-type so a lowercase loop type still links
+                    String iterable = isTyped(base(fe.type())) && iterableIsSObjectList(fe.iterable())
+                        ? typedName(base(fe.type())) + ".many(" + emitExpr(fe.iterable()) + ")"
+                        : emitExpr(fe.iterable());
+                    sb.append(indent).append("for (").append(mapType(fe.type())).append(' ')
+                      .append(fe.name()).append(" : ").append(iterable).append(") {\n");
+                    for (Stmt st : fe.body()) emitStmt(st, indent + "    ", sb);
+                    sb.append(indent).append("}\n");
+                } finally {
+                    locals.clear();
+                    locals.putAll(saved);
+                }
             }
             case For f -> {
-                sb.append(indent).append("for (")
-                  .append(f.init() == null ? "" : emitForClause(f.init())).append("; ")
-                  .append(f.cond() == null ? "" : emitExpr(f.cond())).append("; ")
-                  .append(f.update() == null ? "" : emitForClause(f.update())).append(") {\n");
-                for (Stmt st : f.body()) emitStmt(st, indent + "    ", sb);
-                sb.append(indent).append("}\n");
+                // the init declaration is scoped to the loop (Apex): snapshot before the clause and
+                // body, restore after, so an init var and any body-local don't leak past the loop.
+                java.util.Map<String, String> saved = new java.util.HashMap<>(locals);
+                try {
+                    if (f.init() instanceof VarDecl iv) locals.put(iv.name(), qualifyInnerType(iv.type()));
+                    sb.append(indent).append("for (")
+                      .append(f.init() == null ? "" : emitForClause(f.init())).append("; ")
+                      .append(f.cond() == null ? "" : emitExpr(f.cond())).append("; ")
+                      .append(f.update() == null ? "" : emitForClause(f.update())).append(") {\n");
+                    for (Stmt st : f.body()) emitStmt(st, indent + "    ", sb);
+                    sb.append(indent).append("}\n");
+                } finally {
+                    locals.clear();
+                    locals.putAll(saved);
+                }
             }
             case Dml d -> sb.append(indent).append("Database.").append(d.op())
                 .append('(').append(emitExpr(d.value())).append(");\n");
@@ -1042,28 +1060,57 @@ final class Transpiler {
             case GuardedBlock g -> {
                 // guard (e.g. System.runAs(u)) has no local equivalent — run the body in a plain block
                 sb.append(indent).append("{\n");
-                for (Stmt st : g.body()) emitStmt(st, indent + "    ", sb);
+                scopedBlock(g.body(), indent + "    ", sb);
                 sb.append(indent).append("}\n");
             }
             case Try tr -> {
                 sb.append(indent).append("try {\n");
-                for (Stmt st : tr.body()) emitStmt(st, indent + "    ", sb);
+                scopedBlock(tr.body(), indent + "    ", sb); // try body is its own scope
                 sb.append(indent).append("}");
                 Set<String> seenCatch = new java.util.HashSet<>();
                 for (Catch c : tr.catches()) {
                     String ct = mapType(c.type());
                     if (!seenCatch.add(ct)) continue; // dedupe catches collapsing to one Java type
                     sb.append(" catch (").append(ct).append(' ').append(c.name()).append(") {\n");
-                    for (Stmt st : c.body()) emitStmt(st, indent + "    ", sb);
+                    // the catch param is in scope only inside its block: bind it, then restore.
+                    java.util.Map<String, String> saved = new java.util.HashMap<>(locals);
+                    try {
+                        locals.put(c.name(), qualifyInnerType(c.type()));
+                        for (Stmt st : c.body()) emitStmt(st, indent + "    ", sb);
+                    } finally {
+                        locals.clear();
+                        locals.putAll(saved);
+                    }
                     sb.append(indent).append("}");
                 }
                 if (!tr.finallyBody().isEmpty()) {
                     sb.append(" finally {\n");
-                    for (Stmt st : tr.finallyBody()) emitStmt(st, indent + "    ", sb);
+                    scopedBlock(tr.finallyBody(), indent + "    ", sb); // finally body is its own scope
                     sb.append(indent).append("}");
                 }
                 sb.append('\n');
             }
+        }
+    }
+
+    // Apex is BLOCK-scoped, but `locals` is one method-wide map that emission mutates as a side
+    // effect (VarDecl, for-each loop var, classic-for init, catch param all `put` into it). Without
+    // restoration a block-local name would LEAK past its block and the case-insensitive shadow guard
+    // would then suppress a field token later in the method (where the name is out of scope). So run
+    // each block body between a snapshot and a restore: the snapshot is the exact save/restore idiom
+    // safeNav uses for its synthetic param, lifted to the whole map. Restoring the saved entries (not
+    // bare removals) also handles SHADOWING — a block-local that overrode an outer field copied into
+    // `locals` brings the field's value (and its instance semantics) back when the block ends. Only
+    // method-wide entries (fields seeded at method start, params) survive, exactly as Apex requires.
+    // The reassignment set (collectReassigned/methodScopeLocals) is a SEPARATE method-wide walk and
+    // is deliberately NOT scoped here (Java's effectively-final rule is method-wide, not block-wide).
+    private void scopedBlock(List<Stmt> body, String indent, StringBuilder sb) {
+        java.util.Map<String, String> saved = new java.util.HashMap<>(locals);
+        try {
+            for (Stmt st : body) emitStmt(st, indent, sb);
+        } finally {
+            locals.clear();
+            locals.putAll(saved);
         }
     }
 
@@ -1208,8 +1255,14 @@ final class Transpiler {
         // STATIC SObjectType token on a typed sObject TYPE: `Account.SObjectType` (the property
         // form) converges with `Account.getSObjectType()` (the call form, see methodCall) onto the
         // same runtime SObjectType. Same guards: a bare, UNSHADOWED sObject type name (a variable of
-        // the same name keeps instance/field semantics; a user class isn't an sObject).
-        if (p.target() instanceof Name stn && p.name().equalsIgnoreCase("SObjectType")
+        // the same name keeps instance/field semantics; a user class isn't an sObject). The target
+        // must be a genuine TYPE name, never `this`/the synthetic `<Cls>.this`: a class may declare a
+        // FIELD called `sObjectType`, and `this.sObjectType` is an instance member read/WRITE, not the
+        // token (isSObjectName's unknown-name fallback would otherwise treat `this` as an sObject). An
+        // assignment TARGET never reaches here either — the Assign path emits its LHS field write
+        // before deferring to expression emission (see emitStmt), mirroring the field-token guard.
+        if (p.target() instanceof Name stn && !ExprTyper.isThisRef(stn.ident())
+                && p.name().equalsIgnoreCase("SObjectType")
                 && !localsHasIgnoreCase(stn.ident()) && !userClasses.contains(stn.ident())
                 && isSObjectName(stn.ident())) {
             return "new SObjectType(\"" + escape(typedName(stn.ident())) + "\")";
