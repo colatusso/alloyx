@@ -62,7 +62,8 @@ public class Strings {
      * Apex {@code String.join(Iterable, separator)}: concatenates each element's
      * string value, placing {@code separator} between consecutive elements.
      */
-    public static String join(Iterable<?> items, String separator) {
+    // qualified: the unqualified name resolves to the same-package Apex-shaped alloyx Iterable
+    public static String join(java.lang.Iterable<?> items, String separator) {
         StringBuilder sb = new StringBuilder();
         boolean first = true;
         for (Object item : items) {

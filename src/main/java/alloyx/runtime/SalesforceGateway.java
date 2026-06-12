@@ -389,7 +389,8 @@ public final class SalesforceGateway implements OrgGateway {
         if (v instanceof Number) {
             return v.toString();
         }
-        if (v instanceof Iterable<?> it) {
+        // qualified: the unqualified name resolves to the same-package Apex-shaped alloyx Iterable
+        if (v instanceof java.lang.Iterable<?> it) {
             java.util.List<String> parts = new ArrayList<>();
             for (Object o : it) {
                 parts.add(formatValue(o));
