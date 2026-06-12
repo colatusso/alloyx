@@ -51,6 +51,10 @@ final class ExprTyper {
     private final Set<String> typedSObjects;
     private final Set<String> userClasses;
     private final Set<String> innerTypes;
+    // lowercased built-in/native/runtime type names the Transpiler already recognizes (Integer,
+    // Decimal, Database, Test, ...). Feeds isKnownTypeName so a bare ident that NAMES a type is
+    // never mistaken for an inherited field (e.g. `Pay.split(x)` where a superclass field is `pay`).
+    private final Set<String> builtinTypeNames;
     // class (simple name) -> (lowercase member -> declared Apex type). Covers fields, method
     // return types and params of the class(es) the Transpiler currently holds, so a same-class
     // method call / field read can be typed. Names alone live in `memberIndex`; this adds types.
@@ -62,7 +66,8 @@ final class ExprTyper {
 
     ExprTyper(SchemaProvider schema, Set<String> typedSObjects, Set<String> userClasses,
               Set<String> innerTypes, Map<String, Map<String, String>> memberTypes,
-              Map<String, String> locals, java.util.function.Supplier<Map<String, String>> fieldTypes) {
+              Map<String, String> locals, java.util.function.Supplier<Map<String, String>> fieldTypes,
+              Set<String> builtinTypeNames) {
         this.schema = schema;
         this.typedSObjects = typedSObjects;
         this.userClasses = userClasses;
@@ -70,6 +75,24 @@ final class ExprTyper {
         this.memberTypes = memberTypes;
         this.locals = locals;
         this.fieldTypes = fieldTypes;
+        this.builtinTypeNames = builtinTypeNames;
+    }
+
+    // Whether `ident` names a KNOWN type — a user class, an inner type, a generated typed sObject,
+    // or a built-in/native/runtime type (case-insensitive, as Apex is) — rather than a value. The
+    // bare-name field fallback must NOT treat such an ident as an inherited field: when a static
+    // call's target (`Pay.split(x)`) collides with an inherited field name (`pay`), resolving it as
+    // the field mis-routes emission. Apex prefers a genuine variable over a class name, but locals
+    // already win before this check; the inherited-field-vs-class collision is rare enough that
+    // preferring the CLASS (return null -> default static-call emission) is the conservative choice.
+    boolean isKnownTypeName(String ident) {
+        if (ident == null) {
+            return false;
+        }
+        if (userClasses.contains(ident) || innerTypes.contains(ident) || typedSObjects.contains(ident)) {
+            return true;
+        }
+        return builtinTypeNames.contains(ident.toLowerCase(Locale.ROOT));
     }
 
     /**
@@ -117,6 +140,13 @@ final class ExprTyper {
             if (en.getKey().equalsIgnoreCase(n.ident())) {
                 return en.getValue();
             }
+        }
+        // a bare ident that NAMES a type (Pay in `Pay.split(x)`) is the target of a static call, not
+        // an inherited field — even if the current class inherits a field of the same name. Don't
+        // resolve it as a field; null falls through to the default static-call emission (the
+        // conservative choice: prefer the class on the rare field-vs-class collision).
+        if (isKnownTypeName(n.ident())) {
+            return null;
         }
         // an INHERITED field read without `this.`: the current body's own fields live in
         // locals, a superclass's don't — resolve through the member index's extends walk.
@@ -267,11 +297,36 @@ final class ExprTyper {
             return null; // unknown class, or a cycle already visited -> stop (no infinite loop)
         }
         String own = m.get(member.toLowerCase(Locale.ROOT));
+        // an ambiguity-poisoned entry (a param position, or a contested same-simple-name inner
+        // alias) is load-bearing null: fall through to default emission, never a wrong type.
         if (own != null) {
-            return own;
+            return Transpiler.isAmbiguous(own) ? null : own;
         }
         String sup = m.get(Transpiler.EXTENDS_KEY);
-        return sup == null ? null : memberType(sup, member, seen);
+        if (sup == null) {
+            return null;
+        }
+        // Heritage is stored by SIMPLE name. Walking from an inner to its super, prefer the
+        // SAME-OUTER qualified entry (OuterA.Sup) — that's Apex's sibling-inner scoping, and it's
+        // the only one left when the bare `Sup` alias is poisoned by a same-simple-name inner in a
+        // different outer. The outer is the klass's own qualifier, or — when we reached the entry by
+        // its simple alias (`Sub`, not `OuterA.Sub`) — the alias's recorded qualified owner.
+        String origin = klass.contains(".") ? klass : m.get(Transpiler.QUALIFIED_OWNER);
+        return memberType(qualifySuper(origin, sup), member, seen);
+    }
+
+    // Given the qualified origin (Outer.Inner) of the entry we're walking from and a bare super
+    // simple name, return the SAME-OUTER qualified super (Outer.Sup) when that entry exists; else
+    // the super unchanged (a top-level super resolves via its simple name as before).
+    private String qualifySuper(String origin, String sup) {
+        if (origin != null && origin.contains(".") && !sup.contains(".")) {
+            String outer = origin.substring(0, origin.lastIndexOf('.'));
+            String qualified = outer + "." + sup;
+            if (memberTypes.containsKey(qualified)) {
+                return qualified;
+            }
+        }
+        return sup;
     }
 
     // The member-type entry for a class, by simple name (Outer.Inner -> Inner), or null.

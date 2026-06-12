@@ -121,6 +121,23 @@ final class Transpiler {
     private static final Set<String> SCALARS = Set.of("String", "Integer", "Long", "Double",
         "Decimal", "Boolean", "Date", "Datetime", "Time", "Id", "Blob", "Object", "void");
 
+    // Every built-in/native/runtime/schema/Database type name the Transpiler recognizes, LOWERCASED
+    // (Apex is case-insensitive). Built once from the existing constants (DRY) and handed to the
+    // typer's isKnownTypeName, so a bare ident that names a type is never mistaken for an inherited
+    // field. The BUILTINS values (System, Math, Database, JSON, ...) cover the namespace roots a
+    // static call can target; their keys are already the lowercased scalar/collection names.
+    private static final Set<String> BUILTIN_TYPE_NAMES = buildBuiltinTypeNames();
+
+    private static Set<String> buildBuiltinTypeNames() {
+        java.util.Set<String> s = new java.util.HashSet<>();
+        for (Set<String> group : List.of(SCALARS, COLLECTIONS, RUNTIME_TYPES, SCHEMA_TYPES, DATABASE_TYPES)) {
+            for (String n : group) s.add(n.toLowerCase(java.util.Locale.ROOT));
+        }
+        for (String k : BUILTINS.keySet()) s.add(k); // already lowercase
+        for (String v : BUILTINS.values()) s.add(v.toLowerCase(java.util.Locale.ROOT));
+        return java.util.Set.copyOf(s);
+    }
+
     private final Set<String> userClasses;
     private final SchemaProvider schema;
     // sObjects with a generated typed class (described via sync); empty -> everything
@@ -162,7 +179,7 @@ final class Transpiler {
         // the current class's entry without mutating the shared map other Transpilers read from.
         this.memberTypes = new java.util.HashMap<>(memberTypes);
         this.typer = new ExprTyper(schema, typedSObjects, userClasses, innerTypes, this.memberTypes,
-            locals, () -> fieldTypes);
+            locals, () -> fieldTypes, BUILTIN_TYPE_NAMES);
     }
 
     private boolean isSObject(Expr e) {
@@ -185,9 +202,12 @@ final class Transpiler {
         return switch (e) {
             case Name n -> {
                 String t = n.ident().equals("this") ? null : locals.get(n.ident());
-                if (t == null && !n.ident().equals("this")) {
+                if (t == null && !n.ident().equals("this") && !typer.isKnownTypeName(n.ident())) {
                     // an inherited field read without `this.`: not in locals (only the current
-                    // body's own fields are) — resolve through the member index's extends walk
+                    // body's own fields are) — resolve through the member index's extends walk.
+                    // A bare ident that NAMES a type (the target of a static call) is NOT an
+                    // inherited field, even when a superclass declares a field of the same name;
+                    // skip the field walk so the static-call emission isn't mis-routed.
                     t = memberType(typer.currentClass, n.ident());
                 }
                 yield t != null && isSObjectName(base(t)) ? base(t) : null;
@@ -365,22 +385,56 @@ final class Transpiler {
     // inheritance chain; CTOR_PARAM is the per-position constructor param type (the ctor itself
     // carries no return type, so `(new)#i` is the only way a `new Foo(args)` site recovers it).
     static final String EXTENDS_KEY = "(extends)";
+    // Ambiguity sentinel (two flavors, both load-bearing → null at lookup, no coercion / no typing):
+    //  - at the PARAM level: a position contested by overloads with DIFFERENT types at the same
+    //    index (Pay(Decimal) vs Pay(Integer)). Coercing then would silently bind the WRONG Java
+    //    overload; we'd rather not coerce and let the literal pick Apex's overload natively.
+    //  - at the CLASS level: a simple inner-class key contested by a SECOND outer's same-simple-name
+    //    inner (OuterA.Helper vs OuterB.Helper). Merging would mis-type a cross-class read; we poison
+    //    the simple entry so unqualified lookups fall through (qualified Outer.Inner stays correct).
+    static final String AMBIGUOUS = "(ambiguous)";
     private static String ctorParamKey(int i) {
         return "(new)#" + i;
     }
 
+    /** Whether a member-type lookup hit the ambiguity sentinel (so no coercion / no typing fires). */
+    static boolean isAmbiguous(String type) {
+        return AMBIGUOUS.equals(type);
+    }
+
+    // Register a param-position type with compare-and-mark (NOT putIfAbsent): first writer wins, a
+    // later SAME type is a true overload and stays usable, but a later DIFFERENT type at the same
+    // position poisons the key with AMBIGUOUS so the call site won't coerce into the wrong overload.
+    private static void markParam(java.util.Map<String, String> m, String key, String type) {
+        String prev = m.putIfAbsent(key, type);
+        if (prev != null && !prev.equals(type)) {
+            m.put(key, AMBIGUOUS); // overloads disagree at this position → no coercion
+        }
+    }
+
     // Index a class's members (fields + method return types + param types) by lowercase name,
     // keyed by class simple name, into `into`, so the central typer can type a field read / method
-    // call and coerce a Decimal-param call argument. Recurses into inners (indexed by simple name,
-    // matched as Outer.Inner too). Param types use a `(name)#i` key to avoid colliding with a
-    // same-named field/method; the lookup the typer needs by name is the return type. The
-    // superclass simple name is recorded under EXTENDS_KEY so the lookups can climb the chain to
-    // an inherited member. Static so Workspace can build the SAME index over EVERY class in the
-    // compile set (cross-class typing).
+    // call and coerce a Decimal-param call argument. Param types use a `(name)#i` key to avoid
+    // colliding with a same-named field/method; the lookup the typer needs by name is the return
+    // type. The superclass simple name is recorded under EXTENDS_KEY so the lookups can climb the
+    // chain to an inherited member. Static so Workspace can build the SAME index over EVERY class in
+    // the compile set (cross-class typing).
     static void populateMemberTypes(ClassDecl cls,
             java.util.Map<String, java.util.Map<String, String>> into) {
+        populateMemberTypes(cls, into, null);
+    }
+
+    // `qualified`, when non-null, is the Outer.Inner name an inner class is ALSO indexed under (a
+    // collision-free key), in addition to its simple name. The qualified entry is authoritative for
+    // that inner; the simple entry is a retrocompat alias for unqualified references and is POISONED
+    // if a second, different outer contributes an inner with the same simple name (see AMBIGUOUS).
+    private static void populateMemberTypes(ClassDecl cls,
+            java.util.Map<String, java.util.Map<String, String>> into, String qualified) {
+        // Build the class's own members into a fresh map first, then publish it under its key(s).
+        // (For an outer/top-level class this map IS its entry; for an inner it's the authoritative
+        // qualified entry AND the source the simple alias mirrors when uncontested.)
         java.util.Map<String, String> m =
-            into.computeIfAbsent(cls.name(), k -> new java.util.HashMap<>());
+            into.computeIfAbsent(qualified != null ? qualified : cls.name(), k -> new java.util.HashMap<>());
         // superclass heritage: stored by SIMPLE name (Outer.Inner -> Inner), the same resolution
         // the rest of the index uses, so the chain walk resolves against the indexed entries.
         if (cls.superclass() != null) {
@@ -402,14 +456,53 @@ final class Transpiler {
             }
             // params keyed by position so a call site can recover the declared param type;
             // a constructor's go under `(new)#i` so `new Foo(args)` can coerce a Decimal arg.
+            // markParam (not putIfAbsent) so overloads disagreeing at a position poison the key.
             for (int i = 0; i < md.params().size(); i++) {
-                m.putIfAbsent("(" + mn + ")#" + i, md.params().get(i).type());
+                markParam(m, "(" + mn + ")#" + i, md.params().get(i).type());
                 if (isCtor) {
-                    m.putIfAbsent(ctorParamKey(i), md.params().get(i).type());
+                    markParam(m, ctorParamKey(i), md.params().get(i).type());
                 }
             }
         }
-        for (ClassDecl inner : cls.inners()) populateMemberTypes(inner, into);
+        // For an inner, also publish under the simple-name alias — mirroring its members for
+        // retrocompat unqualified references — UNLESS a different outer already claimed that simple
+        // name, in which case the alias is poisoned (a wrong merge would mis-type a cross-class read).
+        if (qualified != null) {
+            aliasInner(into, cls.name(), qualified, m);
+        }
+        // inners: indexed under BOTH the collision-free Outer.Inner key and the simple alias.
+        for (ClassDecl inner : cls.inners()) {
+            populateMemberTypes(inner, into, cls.name() + "." + inner.name());
+        }
+    }
+
+    // Reserved marker the simple inner-class alias carries to record which qualified inner owns it —
+    // so a second, different outer's same-simple-name inner is detected and poisons the alias, and
+    // so the typer can recover the outer to qualify a sibling-inner super. Not a valid Apex
+    // identifier, so it never collides with a real member.
+    static final String QUALIFIED_OWNER = "(qualified-owner)";
+
+    // Publish an inner's members under its simple-name alias. First qualified inner to claim the
+    // simple name owns it (its members are mirrored). A second, DIFFERENT qualified inner with the
+    // same simple name poisons the alias (cleared + AMBIGUOUS marker) so unqualified lookups miss and
+    // fall through, rather than reading a wrong merge. The SAME inner re-registering (idempotent
+    // re-seed) is a no-op refresh of its own alias.
+    private static void aliasInner(java.util.Map<String, java.util.Map<String, String>> into,
+            String simpleName, String qualified, java.util.Map<String, String> members) {
+        java.util.Map<String, String> alias =
+            into.computeIfAbsent(simpleName, k -> new java.util.HashMap<>());
+        String owner = alias.get(QUALIFIED_OWNER);
+        if (owner != null && !owner.equals(qualified)) {
+            alias.clear(); // contested by a different outer's inner → ambiguous
+            alias.put(AMBIGUOUS, AMBIGUOUS);
+            return;
+        }
+        if (alias.get(AMBIGUOUS) != null) {
+            return; // already poisoned by an earlier contest; stay poisoned
+        }
+        alias.clear();
+        alias.putAll(members); // mirror the authoritative qualified entry
+        alias.put(QUALIFIED_OWNER, qualified);
     }
 
     // The declared Apex type of param #index of a bare same-class method (by lowercase method
@@ -420,7 +513,9 @@ final class Transpiler {
     }
 
     // Same, but for a method on a known user class (e.g. an explicit `obj.m(...)` where obj's
-    // static type is in our member index). Unknown class/method -> null (no coercion).
+    // static type is in our member index). Unknown class/method -> null (no coercion). A position
+    // contested by disagreeing overloads is AMBIGUOUS -> also null, so we never coerce into the
+    // wrong Java overload.
     private String paramTypeOf(String klass, String method, int index) {
         if (klass == null) {
             return null;
@@ -429,7 +524,8 @@ final class Transpiler {
         if (m == null && base(klass).contains(".")) {
             m = memberTypes.get(base(klass).substring(base(klass).lastIndexOf('.') + 1));
         }
-        return m == null ? null : m.get("(" + method.toLowerCase(java.util.Locale.ROOT) + ")#" + index);
+        String t = m == null ? null : m.get("(" + method.toLowerCase(java.util.Locale.ROOT) + ")#" + index);
+        return isAmbiguous(t) ? null : t;
     }
 
     // Emit a class body from its header onward at the given indent. The caller writes the
@@ -1194,7 +1290,8 @@ final class Transpiler {
     }
 
     // The declared Apex type of constructor param #index of a known user class (via the `(new)#i`
-    // index), or null. Mirrors paramTypeOf for the constructor key.
+    // index), or null. Mirrors paramTypeOf for the constructor key — including AMBIGUOUS -> null
+    // (overloaded ctors disagree at this position), so we never coerce into the wrong overload.
     private String ctorParamTypeOf(String klass, int index) {
         if (klass == null) {
             return null;
@@ -1203,7 +1300,8 @@ final class Transpiler {
         if (m == null && base(klass).contains(".")) {
             m = memberTypes.get(base(klass).substring(base(klass).lastIndexOf('.') + 1));
         }
-        return m == null ? null : m.get(ctorParamKey(index));
+        String t = m == null ? null : m.get(ctorParamKey(index));
+        return isAmbiguous(t) ? null : t;
     }
 
     private String emitArgs(List<Expr> args) {
