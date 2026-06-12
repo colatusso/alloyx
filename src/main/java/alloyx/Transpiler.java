@@ -291,11 +291,17 @@ final class Transpiler {
 
     // The declared Apex type of `target.field` when `target` is a known user-class instance and
     // `field` is one of its members (via the cross-class member-type index), else null. Drives the
-    // Decimal-widen on an Assign-to-Prop whose target is another class's field (cart.cost = 333).
-    // Excludes a `this`-rooted target: that's already handled by the field-local widen paths.
+    // Decimal-widen on an Assign-to-Prop whose target is another class's field (cart.cost = 333)
+    // OR the current class's own field via `this` (this.cost = 333).
     private String propFieldType(Prop p) {
+        // this.<field>: typeOf(this) is null (by design), so the cross-class branch below can't
+        // see it. Resolve through the typer's this.<field> path, which consults the current class
+        // body's field view and walks the extends chain — and, crucially, ignores locals, so a
+        // same-named Integer local that shadows a Decimal FIELD doesn't mistype `this.field`.
+        // (The original bail returned null here, which the `declared == null` guard already did;
+        // it just pre-empted this resolution — restoring it is what lets `this.field = 0` widen.)
         if (p.target() instanceof Name tn && tn.ident().equals("this")) {
-            return null;
+            return typer.typeOf(p);
         }
         String declared = typer.typeOf(p.target());
         if (declared == null || !userClasses.contains(base(declared))) {
@@ -930,6 +936,12 @@ final class Transpiler {
     private static final java.util.Map<String, String> DECIMAL_NARROW = java.util.Map.of(
         "Integer", "intValue", "Long", "longValue", "Double", "doubleValue");
 
+    // Integer.valueOf(dec)/Long.valueOf(dec): the canonical built-in type name -> the runtime
+    // Decimal extraction it narrows to. Same intent as DECIMAL_NARROW, but for the static
+    // valueOf form Apex allows on a Decimal (Java's java.lang.Integer/Long lack that overload).
+    private static final java.util.Map<String, String> NUMERIC_VALUEOF_NARROW = java.util.Map.of(
+        "Integer", "intValue", "Long", "longValue");
+
     private String emitCast(Cast c) {
         // (Integer) someDecimal / (Long) / (Double): emit dec.intValue()/longValue()/doubleValue()
         // instead of an illegal Java cast of a BigDecimal to a primitive box.
@@ -1111,6 +1123,14 @@ final class Transpiler {
         if (mc.target() instanceof Name n) {
             String canon = BUILTINS.get(n.ident().toLowerCase());
             if (canon != null) {
+                // Integer.valueOf(dec) / Long.valueOf(dec): Apex narrows a Decimal; Java's
+                // java.lang.Integer.valueOf has no Decimal overload, so route to the runtime
+                // Decimal's truncating extraction (mirrors the DECIMAL_NARROW cast path).
+                String narrow = NUMERIC_VALUEOF_NARROW.get(canon);
+                if (narrow != null && name.equalsIgnoreCase("valueOf")
+                        && mc.args().size() == 1 && isDecimal(mc.args().get(0))) {
+                    return "(" + emitExpr(mc.args().get(0)) + ")." + narrow + "()";
+                }
                 String type = canon.equals("String") ? "Strings" : canon; // String statics -> helper
                 String method = canon.equals("System") && name.equalsIgnoreCase("assert")
                     ? "assertTrue" : lowerFirst(name);
@@ -1123,9 +1143,17 @@ final class Transpiler {
             return "Strings." + name + "(" + emitExpr(mc.target())
                 + (args.isEmpty() ? "" : ", " + args) + ")";
         }
-        // a method on a known user-class instance: coerce an Integer arg into a Decimal param
-        // (Apex widens). The target's static type drives the param lookup; unknown -> unchanged.
-        String args = emitMethodArgs(typer.typeOf(mc.target()), name, mc.args());
+        // a method on a known user-class: coerce an Integer arg into a Decimal param (Apex widens).
+        // An INSTANCE call uses the target's static type; a STATIC call (Factory.make(...)) has a
+        // bare type-name target that typeOf reports null for (by design), so use that name as the
+        // lookup key — the member-type index stores static methods' params under the same key.
+        // Ambiguous overloads stay poisoned (AMBIGUOUS -> no coercion) for either call shape.
+        // A local/field sharing the type's exact name shadows it (Apex: variables win over types),
+        // so only treat the target as a static-call class name when no local/field claims it.
+        String klass = mc.target() instanceof Name tn && !locals.containsKey(tn.ident())
+                && typer.isKnownTypeName(tn.ident())
+            ? tn.ident() : typer.typeOf(mc.target());
+        String args = emitMethodArgs(klass, name, mc.args());
         return emitExpr(mc.target()) + "." + name + "(" + args + ")";
     }
 

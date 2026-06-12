@@ -345,6 +345,100 @@ class InheritanceAndNumericMatrixTest {
         assertEquals(42, result);
     }
 
+    // --- Fix 3: residual numeric widen contexts (this-field assign, static-call args, Integer.valueOf) ---
+
+    @Test
+    void thisDecimalFieldAssign_widensIntegerAndRuns() throws Exception {
+        // this.minimumOrderValue = 0 — a same-class Decimal field assigned an Integer literal via
+        // `this`. The bare-Name path widens `field = 0`; the this-rooted form must widen too, or
+        // javac rejects "Integer cannot be converted to Decimal".
+        Path store = probe("StoreConfig", """
+            public class StoreConfig {
+                public Decimal minimumOrderValue;
+                public StoreConfig() {
+                    this.minimumOrderValue = 0;
+                }
+                public Decimal minimum() { return this.minimumOrderValue; }
+                public static Decimal go() { return new StoreConfig().minimum(); }
+            }
+            """);
+        Object result = Workspace.compile(List.of(store)).load("StoreConfig").getMethod("go").invoke(null);
+        assertTrue(result instanceof Decimal, "expected a Decimal, got " + result);
+        assertEquals(0, ((Decimal) result).compareTo(Decimal.valueOf("0")));
+    }
+
+    @Test
+    void thisDecimalFieldAssign_withShadowingIntegerLocal_widensViaFieldType() throws Exception {
+        // A LOCAL `Integer x` shadows the FIELD `Decimal x`. `this.x = 0` must widen via the FIELD
+        // type (Decimal), while a bare `x = 0` keeps targeting the Integer local (no widen). Both
+        // assignments compile and the field ends up a Decimal 0 — no shadowing regression.
+        Path shadow = probe("Shadow", """
+            public class Shadow {
+                public Decimal x;
+                public Decimal set() {
+                    Integer x = 5;
+                    x = 0;
+                    this.x = 0;
+                    return this.x;
+                }
+                public static Decimal go() { return new Shadow().set(); }
+            }
+            """);
+        Object result = Workspace.compile(List.of(shadow)).load("Shadow").getMethod("go").invoke(null);
+        assertTrue(result instanceof Decimal, "expected a Decimal, got " + result);
+        assertEquals(0, ((Decimal) result).compareTo(Decimal.valueOf("0")));
+    }
+
+    @Test
+    void staticCallDecimalParams_coerceIntegerArguments() throws Exception {
+        // Factory.make('k', 10, 10) where make(String, Decimal, Decimal) is STATIC. The target is a
+        // bare type-name (typeOf reports null by design), so the param lookup must key off that name
+        // or the two Integer args never widen into the Decimal params.
+        Path factory = probe("Factory", """
+            public class Factory {
+                public static Decimal make(String key, Decimal price, Decimal qty) {
+                    return price + qty;
+                }
+                public static Decimal go() { return Factory.make('k', 10, 10); }
+            }
+            """);
+        Object result = Workspace.compile(List.of(factory)).load("Factory").getMethod("go").invoke(null);
+        assertEquals(0, ((Decimal) result).compareTo(Decimal.valueOf("20")));
+    }
+
+    @Test
+    void staticCall_ambiguousOverload_doesNotCoerce() {
+        // STATIC overloads pick(Decimal) vs pick(Integer) disagree at position 0 -> the param key is
+        // AMBIGUOUS-poisoned, so the Integer argument must NOT be coerced (it would silently bind the
+        // wrong Java overload). The emitted call passes the bare literal, never Decimal.valueOf(7).
+        String java = transpile("""
+            public class Picker {
+                public static Decimal pick(Decimal v) { return v; }
+                public static Decimal pick(Integer v) { return v; }
+                public static Decimal go() { return Picker.pick(7); }
+            }
+            """);
+        assertTrue(java.contains("Picker.pick(7)"), java);
+        assertTrue(!java.contains("Decimal.valueOf(7)"), java);
+    }
+
+    @Test
+    void integerValueOfDecimal_narrowsViaIntValue() throws Exception {
+        // Integer.valueOf(someDecimal): Apex narrows a Decimal; java.lang.Integer.valueOf has no
+        // Decimal overload, so emit (dec).intValue() (truncating), mirroring the cast-narrow path.
+        Path conv = probe("ToInt", """
+            public class ToInt {
+                public static Integer go() {
+                    Decimal dec = 42;
+                    Integer i = Integer.valueOf(dec);
+                    return i;
+                }
+            }
+            """);
+        Object result = Workspace.compile(List.of(conv)).load("ToInt").getMethod("go").invoke(null);
+        assertEquals(42, result);
+    }
+
     // --- Fix 2 regression guards (source-shape, no schema) ---
 
     @Test
