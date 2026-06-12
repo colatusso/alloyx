@@ -83,13 +83,190 @@ public final class Database {
         return out;
     }
 
-    /** Local has no transaction boundary; savepoint/rollback are stubs. */
-    public static Object setSavepoint() {
-        return null;
+    // --- Batch orchestration ------------------------------------------------------------------
+    // executeBatch hands a Batchable to the async framework (chunking, scope iteration, retries) —
+    // none of which exists locally — so it degrades clearly. The optional scope arg doesn't change
+    // that. Returning a fake AsyncApexJob id would imply a job that never runs, so we don't.
+
+    public static String executeBatch(Object batchable) {
+        throw Unsupported.notLocal("Database.executeBatch()");
     }
 
-    public static void rollback(Object savepoint) {
-        // no-op locally
+    public static String executeBatch(Object batchable, Integer scope) {
+        throw Unsupported.notLocal("Database.executeBatch()");
+    }
+
+    // --- Savepoint / rollback -----------------------------------------------------------------
+    // DML hits the org through the gateway when connected. A local "rollback" that no-op'd would
+    // LIE about the data state (the inserted/updated rows are already in the org), so rollback
+    // degrades honestly. setSavepoint hands back an opaque token so the declared type resolves and
+    // the savepoint variable round-trips through code, even though it carries no undoable state.
+
+    /** Opaque transaction savepoint token (Apex {@code System.Savepoint}). Carries no local state. */
+    public static final class Savepoint {
+        private Savepoint() {
+        }
+    }
+
+    public static Savepoint setSavepoint() {
+        return new Savepoint();
+    }
+
+    public static void rollback(Savepoint savepoint) {
+        // A local rollback can't undo rows the gateway already committed to the org — degrade
+        // honestly rather than silently leave the data in a state the caller thinks was rolled back.
+        throw Unsupported.notLocal("Database.rollback()");
+    }
+
+    // --- Lead conversion ----------------------------------------------------------------------
+    // LeadConvert is pure data (setters store, getters read back), so domain code that builds one
+    // compiles and round-trips. The conversion itself (creating Account/Contact/Opportunity and
+    // flipping the lead) is org-bound, so convertLead degrades clearly. LeadConvertResult mirrors
+    // the per-row outcome surface the way the DML results do.
+
+    public static LeadConvertResult convertLead(LeadConvert leadToConvert) {
+        throw Unsupported.notLocal("Database.convertLead()");
+    }
+
+    public static LeadConvertResult convertLead(LeadConvert leadToConvert, Boolean allOrNone) {
+        throw Unsupported.notLocal("Database.convertLead()");
+    }
+
+    public static List<LeadConvertResult> convertLead(List<LeadConvert> leadsToConvert) {
+        throw Unsupported.notLocal("Database.convertLead()");
+    }
+
+    /**
+     * Input to {@code Database.convertLead(...)} (Database.LeadConvert). Pure data: the setters
+     * store their value, the getters read it back, so domain code that populates one round-trips
+     * locally. The conversion that consumes it is org-bound (see {@link #convertLead}).
+     */
+    public static final class LeadConvert {
+        private String leadId;
+        private String convertedStatus;
+        private String accountId;
+        private String contactId;
+        private String opportunityName;
+        private Boolean doNotCreateOpportunity;
+        private Boolean overwriteLeadSource;
+        private Boolean sendNotificationEmail;
+        private String ownerId;
+
+        public void setLeadId(String leadId) {
+            this.leadId = leadId;
+        }
+
+        public String getLeadId() {
+            return leadId;
+        }
+
+        public void setConvertedStatus(String convertedStatus) {
+            this.convertedStatus = convertedStatus;
+        }
+
+        public String getConvertedStatus() {
+            return convertedStatus;
+        }
+
+        public void setAccountId(String accountId) {
+            this.accountId = accountId;
+        }
+
+        public String getAccountId() {
+            return accountId;
+        }
+
+        public void setContactId(String contactId) {
+            this.contactId = contactId;
+        }
+
+        public String getContactId() {
+            return contactId;
+        }
+
+        public void setOpportunityName(String opportunityName) {
+            this.opportunityName = opportunityName;
+        }
+
+        public String getOpportunityName() {
+            return opportunityName;
+        }
+
+        public void setDoNotCreateOpportunity(Boolean doNotCreateOpportunity) {
+            this.doNotCreateOpportunity = doNotCreateOpportunity;
+        }
+
+        public Boolean getDoNotCreateOpportunity() {
+            return doNotCreateOpportunity;
+        }
+
+        public void setOverwriteLeadSource(Boolean overwriteLeadSource) {
+            this.overwriteLeadSource = overwriteLeadSource;
+        }
+
+        public Boolean getOverwriteLeadSource() {
+            return overwriteLeadSource;
+        }
+
+        public void setSendNotificationEmail(Boolean sendNotificationEmail) {
+            this.sendNotificationEmail = sendNotificationEmail;
+        }
+
+        public Boolean getSendNotificationEmail() {
+            return sendNotificationEmail;
+        }
+
+        public void setOwnerId(String ownerId) {
+            this.ownerId = ownerId;
+        }
+
+        public String getOwnerId() {
+            return ownerId;
+        }
+    }
+
+    /**
+     * Per-row outcome of {@code Database.convertLead(...)} (Database.LeadConvertResult). The created
+     * record ids are produced by the org conversion, which isn't local, so reading one fails clearly
+     * (mirrors {@link DmlResult}). It exists so the declared return type resolves.
+     */
+    public static final class LeadConvertResult {
+        public boolean isSuccess() {
+            throw Unsupported.notLocal("Database.LeadConvertResult inspection (isSuccess)");
+        }
+
+        public String getLeadId() {
+            throw Unsupported.notLocal("Database.LeadConvertResult inspection (getLeadId)");
+        }
+
+        public String getAccountId() {
+            throw Unsupported.notLocal("Database.LeadConvertResult inspection (getAccountId)");
+        }
+
+        public String getContactId() {
+            throw Unsupported.notLocal("Database.LeadConvertResult inspection (getContactId)");
+        }
+
+        public String getOpportunityId() {
+            throw Unsupported.notLocal("Database.LeadConvertResult inspection (getOpportunityId)");
+        }
+
+        public List<Error> getErrors() {
+            throw Unsupported.notLocal("Database.LeadConvertResult inspection (getErrors)");
+        }
+    }
+
+    // --- Aggregate count ----------------------------------------------------------------------
+    // A COUNT() SOQL returns no records, only an aggregate totalSize the gateway's row-oriented
+    // query() doesn't surface. Faking it by counting returned rows would be wrong (COUNT() returns
+    // zero rows), so countQuery degrades clearly until the gateway models the aggregate response.
+
+    public static Integer countQuery(String soql) {
+        throw Unsupported.notLocal("Database.countQuery()");
+    }
+
+    public static Integer countQuery(String soql, java.util.Map<String, Object> binds) {
+        throw Unsupported.notLocal("Database.countQuery()");
     }
 
     @SuppressWarnings("unchecked")

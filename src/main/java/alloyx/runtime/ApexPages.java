@@ -6,30 +6,54 @@ package alloyx.runtime;
  * Apex {@code ApexPages} — the Visualforce page-message API. Recognized so controller
  * code type-checks. {@link Severity} and {@link Message} are pure data and round-trip
  * locally (a Message stores its severity/summary/detail and reads them back, like a
- * record). The page-bound statics (addMessage/getMessages/...) have no local page
- * context, so they fail clearly rather than silently swallowing messages.
+ * record). The page-message statics (addMessage/getMessages/hasMessages) collect into a
+ * process-static buffer so controller logic that posts a message and reads it back works
+ * locally, mirroring how {@link Message} already round-trips. Truly page-bound state — a
+ * live PageReference, a saved record — has no local equivalent, so those degrade clearly.
  */
 public final class ApexPages {
     private ApexPages() {}
 
+    // Process-static message buffer. There's no per-request page context locally, so messages
+    // accumulate here for the duration of the run; clearMessages() resets it (tests isolate via it).
+    private static final List<Message> MESSAGES = new List<>();
+
     public static void addMessage(Object message) {
-        throw Unsupported.notLocal("ApexPages.addMessage()");
+        MESSAGES.add((Message) message);
     }
 
     public static void addMessages(Object exception) {
-        throw Unsupported.notLocal("ApexPages.addMessages()");
+        // A whole-exception add (Apex maps a DmlException's row errors to messages). Locally we don't
+        // model per-row DML errors, so record one ERROR message carrying the exception's text.
+        MESSAGES.add(new Message(Severity.ERROR, String.valueOf(exception)));
     }
 
     public static List<Message> getMessages() {
-        throw Unsupported.notLocal("ApexPages.getMessages()");
+        return MESSAGES;
     }
 
     public static boolean hasMessages() {
-        throw Unsupported.notLocal("ApexPages.hasMessages()");
+        return !MESSAGES.isEmpty();
     }
 
     public static boolean hasMessages(Severity severity) {
-        throw Unsupported.notLocal("ApexPages.hasMessages(Severity)");
+        for (Message m : MESSAGES) {
+            if (m.getSeverity() == severity) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Reset the local message buffer. Not an Apex API — a local-run/test isolation helper. */
+    public static void clearMessages() {
+        MESSAGES.clear();
+    }
+
+    /** Apex {@code ApexPages.currentPage()}: no Visualforce page context locally, so an empty
+     *  PageReference (no params) stands in — readable like the real one, just unpopulated. */
+    public static PageReference currentPage() {
+        return new PageReference("");
     }
 
     /**
@@ -70,6 +94,109 @@ public final class ApexPages {
 
         public String getDetail() {
             return detail;
+        }
+    }
+
+    /**
+     * Apex {@code ApexPages.StandardController} — the single-record controller a Visualforce
+     * standard page binds to. The record it wraps is pure data and round-trips (getRecord/getId);
+     * the page-bound operations (save/edit/cancel/the navigation PageReferences) need a live page
+     * and an org transaction, so they degrade clearly.
+     */
+    public static class StandardController {
+        private final SObject record;
+
+        public StandardController(SObject record) {
+            this.record = record;
+        }
+
+        public SObject getRecord() {
+            return record;
+        }
+
+        public String getId() {
+            return record == null ? null : (String) record.get("Id");
+        }
+
+        public void addFields(List<String> fieldNames) {
+            // Apex pre-loads these fields for the page; locally the record already carries whatever
+            // was set, so there's nothing to fetch — a no-op (not a degradation).
+        }
+
+        public PageReference save() {
+            throw Unsupported.notLocal("ApexPages.StandardController.save()");
+        }
+
+        public PageReference edit() {
+            throw Unsupported.notLocal("ApexPages.StandardController.edit()");
+        }
+
+        public PageReference delete() {
+            throw Unsupported.notLocal("ApexPages.StandardController.delete()");
+        }
+
+        public PageReference cancel() {
+            throw Unsupported.notLocal("ApexPages.StandardController.cancel()");
+        }
+
+        public PageReference view() {
+            throw Unsupported.notLocal("ApexPages.StandardController.view()");
+        }
+    }
+
+    /**
+     * Apex {@code ApexPages.StandardSetController} — the list controller a Visualforce standard
+     * list page binds to. The wrapped records round-trip (getRecords/getSelected/selection); the
+     * paging and DML-bound operations (save/next/previous) need a live page/org and degrade clearly.
+     */
+    public static class StandardSetController {
+        private List<SObject> records;
+        private List<SObject> selected = new List<>();
+        private Integer pageSize = 20;
+
+        public StandardSetController(List<SObject> records) {
+            this.records = records;
+        }
+
+        public StandardSetController(Database.QueryLocator locator) {
+            // A query-locator-backed set controller streams from the org; local has no cursor.
+            throw Unsupported.notLocal("ApexPages.StandardSetController(QueryLocator)");
+        }
+
+        public List<SObject> getRecords() {
+            return records;
+        }
+
+        public List<SObject> getSelected() {
+            return selected;
+        }
+
+        public void setSelected(List<SObject> selected) {
+            this.selected = selected;
+        }
+
+        public Integer getPageSize() {
+            return pageSize;
+        }
+
+        public void setPageSize(Integer pageSize) {
+            this.pageSize = pageSize;
+        }
+
+        public Integer getRecordsSize() {
+            return records == null ? 0 : records.size();
+        }
+
+        public PageReference save() {
+            throw Unsupported.notLocal("ApexPages.StandardSetController.save()");
+        }
+
+        public void next() {
+            throw Unsupported.notLocal("ApexPages.StandardSetController.next()");
+        }
+
+        public void previous() {
+            throw Unsupported.notLocal("ApexPages.StandardSetController.previous()");
         }
     }
 }

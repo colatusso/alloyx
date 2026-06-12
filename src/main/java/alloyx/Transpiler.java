@@ -41,6 +41,7 @@ final class Transpiler {
         "import alloyx.runtime.Datetime;",
         "import alloyx.runtime.Time;",
         "import alloyx.runtime.JSON;",
+        "import alloyx.runtime.Label;",
         "import alloyx.runtime.UserInfo;",
         "import alloyx.runtime.Strings;",
         "import alloyx.runtime.Type;",
@@ -110,14 +111,16 @@ final class Transpiler {
     private static final Set<String> DATABASE_TYPES =
         Set.of("SaveResult", "UpsertResult", "DeleteResult", "Error",
             "Batchable", "BatchableContext", "QueryLocator",
-            "Stateful", "AllowsCallouts", "RaisesPlatformEvents");
+            "Stateful", "AllowsCallouts", "RaisesPlatformEvents",
+            "Savepoint", "LeadConvert", "LeadConvertResult");
     // Recognized runtime/Database types that carry a generic parameter to PRESERVE (Batchable<T>,
     // Iterable<T>, Iterator<T>) — their <...> must be mapped through, not stripped like the other
     // qualified runtime types. Names are simple (Database. prefix already removed when consulted).
     private static final Set<String> GENERIC_RUNTIME_TYPES =
         Set.of("Batchable", "Iterable", "Iterator");
     // ApexPages namespace nested types: nested classes/enum on the runtime ApexPages, kept qualified
-    private static final Set<String> APEXPAGES_TYPES = Set.of("Severity", "Message");
+    private static final Set<String> APEXPAGES_TYPES =
+        Set.of("Severity", "Message", "StandardController", "StandardSetController");
     // Apex is case-insensitive, so HTTPRequest == HttpRequest and blob == Blob; map a lowercased
     // native type name back to its canonical runtime class.
     private static final java.util.Map<String, String> RUNTIME_CANON = lowerIndex(RUNTIME_TYPES);
@@ -126,6 +129,46 @@ final class Transpiler {
         java.util.Map<String, String> m = new java.util.HashMap<>();
         for (String n : names) m.put(n.toLowerCase(java.util.Locale.ROOT), n);
         return m;
+    }
+
+    // Recognized PLATFORM namespace roots a static call/property can target — the runtime classes
+    // (System, Test, JSON, Database, ...) that BUILTINS / RUNTIME_TYPES back. Keyed by the lowercased
+    // simple name (Apex is case-insensitive) so a `System.<X>` chain can be recognized as rooting at
+    // a real platform TYPE. Also drives reflective method-name case folding (foldStaticMethod):
+    // `system.test.isrunningtest()` / `Database.executebatch(...)` must fold to the canonical Java
+    // method name. Label is included so `System.Label.X` / `Label.X` resolves (see emitProp).
+    private static final java.util.Map<String, Class<?>> PLATFORM_CLASSES = platformClasses();
+
+    private static java.util.Map<String, Class<?>> platformClasses() {
+        java.util.Map<String, Class<?>> m = new java.util.HashMap<>();
+        for (Class<?> c : List.of(
+                alloyx.runtime.System.class, alloyx.runtime.Math.class, alloyx.runtime.Database.class,
+                alloyx.runtime.JSON.class, alloyx.runtime.UserInfo.class, alloyx.runtime.Test.class,
+                alloyx.runtime.Type.class, alloyx.runtime.Limits.class, alloyx.runtime.Assert.class,
+                alloyx.runtime.ApexPages.class, alloyx.runtime.Schema.class, alloyx.runtime.Label.class,
+                alloyx.runtime.EncodingUtil.class, alloyx.runtime.Blob.class, alloyx.runtime.Http.class,
+                alloyx.runtime.Trigger.class, alloyx.runtime.PageReference.class)) {
+            m.put(c.getSimpleName().toLowerCase(java.util.Locale.ROOT), c);
+        }
+        return java.util.Map.copyOf(m);
+    }
+
+    // The canonically-cased Java name of a static method on a recognized platform class, matched
+    // case-INSENSITIVELY (Apex is). Lets `Database.executebatch(...)` / `Test.isrunningtest()` fold
+    // to the real Java method (`executeBatch`/`isRunningTest`). Falls back to lowerFirst (the prior
+    // Date.ValueOf -> valueOf behavior) when the type isn't a known platform class or no method
+    // matches — never less correct than before, since the exact-cased name still folds to itself.
+    private static String foldStaticMethod(String typeSimpleName, String method) {
+        Class<?> c = PLATFORM_CLASSES.get(typeSimpleName.toLowerCase(java.util.Locale.ROOT));
+        if (c != null) {
+            for (java.lang.reflect.Method jm : c.getMethods()) {
+                if (java.lang.reflect.Modifier.isStatic(jm.getModifiers())
+                        && jm.getName().equalsIgnoreCase(method)) {
+                    return jm.getName();
+                }
+            }
+        }
+        return lowerFirst(method);
     }
     // Apex trigger context members -> the runtime Trigger stub's fields (case-insensitive,
     // as Apex is); `new` is a Java keyword so it maps to newRecords.
@@ -1119,7 +1162,58 @@ final class Transpiler {
             : "((" + tt + ") " + emitExpr(c.expr()) + ")";
     }
 
+    // Apex lets a platform static be qualified with the System namespace: `System.Test.startTest()`,
+    // `System.JSON.serialize(x)`, `System.Label.X`, `System.Type.forName(...)`. mapType already
+    // strips `System.` for TYPE positions; this does the same for an EXPRESSION chain so it roots at
+    // the platform TYPE (`Test`, `JSON`, `Label`, ...) instead of reaching javac as a field read
+    // `System.Test`. The strip fires ONLY when the segment after `System.` NAMES a known platform
+    // type (case-insensitive, as Apex is) — so `System.debug(...)`/`System.assert*`/`System.runAs`
+    // (System METHODS, not type names) and `System.now()`/`System.today()` are left untouched and
+    // stay direct System members. CHOICE: the strip re-roots to the bare platform name and lets the
+    // normal routing resolve it, so a user class named exactly like a platform type (e.g. `Test`)
+    // still WINS even for the System-qualified form — same precedence as the un-qualified `Test.x`.
+    // Apex's "explicit System-qualification prefers the platform type" nuance doesn't fall out of a
+    // pure AST re-root (the qualifier signal is gone after stripping); preferring the user type
+    // keeps one consistent precedence rule, and a class colliding with a platform type name is rare.
+    private static Expr stripSystemNamespace(Expr e) {
+        if (e instanceof Prop p && p.target() instanceof Name root
+                && root.ident().equalsIgnoreCase("System")
+                && PLATFORM_CLASSES.containsKey(p.name().toLowerCase(java.util.Locale.ROOT))) {
+            // `System.<X>` -> `<X>` (canonical platform casing), preserving the member name.
+            return new Name(PLATFORM_CLASSES.get(p.name().toLowerCase(java.util.Locale.ROOT))
+                .getSimpleName());
+        }
+        if (e instanceof Prop p) {
+            Expr t = stripSystemNamespace(p.target());
+            return t == p.target() ? p : new Prop(t, p.name(), p.safe());
+        }
+        if (e instanceof MethodCall mc) {
+            Expr t = stripSystemNamespace(mc.target());
+            return t == mc.target() ? mc : new MethodCall(t, mc.name(), mc.args(), mc.safe());
+        }
+        return e;
+    }
+
     private String emitProp(Prop p) {
+        // strip a `System.<PlatformType>` qualifier so the chain roots at the platform type itself
+        Expr stripped = stripSystemNamespace(p);
+        if (stripped != p && stripped instanceof Prop sp) {
+            return emitProp(sp);
+        }
+        // `System.Label.<Name>` / `Label.<Name>` — the label text is org metadata (unavailable
+        // locally), so the read degrades to the developer name via the runtime Label (see Label).
+        if (p.target() instanceof Name lt && lt.ident().equalsIgnoreCase("Label")) {
+            return "Label.get(\"" + escape(p.name()) + "\")";
+        }
+        // STATIC SObjectType token on a typed sObject TYPE: `Account.SObjectType` (the property
+        // form) converges with `Account.getSObjectType()` (the call form, see methodCall) onto the
+        // same runtime SObjectType. Same guards: a bare, UNSHADOWED sObject type name (a variable of
+        // the same name keeps instance/field semantics; a user class isn't an sObject).
+        if (p.target() instanceof Name stn && p.name().equalsIgnoreCase("SObjectType")
+                && !localsHasIgnoreCase(stn.ident()) && !userClasses.contains(stn.ident())
+                && isSObjectName(stn.ident())) {
+            return "new SObjectType(\"" + escape(typedName(stn.ident())) + "\")";
+        }
         // native Apex enum member access is case-insensitive (LoggingLevel.Info); the runtime
         // enum constants are canonical UPPER_CASE, so fold the member to match
         if (p.target() instanceof Name tn) {
@@ -1551,7 +1645,24 @@ final class Transpiler {
     }
 
     private String methodCall(MethodCall mc) {
+        // strip a `System.<PlatformType>` qualifier so the call roots at the platform type itself
+        // (`System.Test.startTest()` -> `Test.startTest()`); then re-enter on the re-rooted call.
+        Expr strippedCall = stripSystemNamespace(mc);
+        if (strippedCall != mc && strippedCall instanceof MethodCall smc) {
+            return methodCall(smc);
+        }
         String name = mc.name();
+        // STATIC getSObjectType() on a typed sObject TYPE: `Account.getSObjectType()` is called ON
+        // THE TYPE, but the runtime SObject only has an INSTANCE getSObjectType() (a static can't
+        // share the signature in the hierarchy). So rewrite the call site to the SObjectType token
+        // directly. The target must be a bare, UNSHADOWED type name (Apex variables win over types,
+        // so a local `inv` named like its type keeps the instance call), the method must be
+        // getSObjectType (case-insensitive) with no args, and the name must denote an sObject type.
+        if (mc.args().isEmpty() && name.equalsIgnoreCase("getSObjectType")
+                && mc.target() instanceof Name tn && !localsHasIgnoreCase(tn.ident())
+                && !userClasses.contains(tn.ident()) && isSObjectName(tn.ident())) {
+            return "new SObjectType(\"" + escape(typedName(tn.ident())) + "\")";
+        }
         // a call whose target is a NESTED ConnectApi/Schema chain (not the bare namespace) is
         // org-coupled and unmodeled: degrade to the runtime placeholder. A call directly on the
         // bare `ConnectApi`/`Schema` name (Schema.getGlobalDescribe()) is a real static and
@@ -1583,8 +1694,10 @@ final class Transpiler {
                     return "(" + emitExpr(mc.args().get(0)) + ")." + narrow + "()";
                 }
                 String type = canon.equals("String") ? "Strings" : canon; // String statics -> helper
+                // case-fold the method to the runtime class's real name (Database.executebatch ->
+                // executeBatch); assert is the keyword-clash special case (-> assertTrue).
                 String method = canon.equals("System") && name.equalsIgnoreCase("assert")
-                    ? "assertTrue" : lowerFirst(name);
+                    ? "assertTrue" : foldStaticMethod(type, name);
                 return type + "." + method + "(" + emitArgs(mc.args()) + ")";
             }
         }
@@ -1593,6 +1706,20 @@ final class Transpiler {
             String args = emitArgs(mc.args());
             return "Strings." + name + "(" + emitExpr(mc.target())
                 + (args.isEmpty() ? "" : ", " + args) + ")";
+        }
+        // a STATIC call on a recognized platform class that ISN'T a BUILTINS namespace root
+        // (Test, ApexPages, Limits, ...): fold the method name to the runtime class's real casing
+        // (Apex is case-insensitive, so `Test.isrunningtest()` must reach `Test.isRunningTest()`).
+        // Only fires for a bare, unshadowed type name (Apex variables win over types).
+        if (mc.target() instanceof Name pn && !userClasses.contains(pn.ident())
+                && !locals.containsKey(pn.ident())
+                && PLATFORM_CLASSES.containsKey(pn.ident().toLowerCase(java.util.Locale.ROOT))) {
+            String type = PLATFORM_CLASSES.get(pn.ident().toLowerCase(java.util.Locale.ROOT))
+                .getSimpleName();
+            String folded = foldStaticMethod(type, name);
+            if (!folded.equals(name) || !type.equals(pn.ident())) {
+                return type + "." + folded + "(" + emitArgs(mc.args()) + ")";
+            }
         }
         // a method on a known user-class: coerce an Integer arg into a Decimal param (Apex widens).
         // An INSTANCE call uses the target's static type; a STATIC call (Factory.make(...)) has a

@@ -33,6 +33,61 @@ public class System {
         return Date.today();
     }
 
+    // --- Async / job orchestration ------------------------------------------------------------
+    // Scheduling, enqueueing and aborting jobs are platform-runtime concerns (the async framework
+    // drives them). There's no local job queue, so these degrade clearly rather than no-op'ing a
+    // job that would never run.
+
+    /** Apex {@code System.schedule(name, cron, schedulable)}: returns the job id on the platform. */
+    public static String schedule(String jobName, String cronExpression, Object schedulable) {
+        throw Unsupported.notLocal("System.schedule()");
+    }
+
+    /** Apex {@code System.enqueueJob(queueable)}: returns the AsyncApexJob id on the platform. */
+    public static String enqueueJob(Object queueable) {
+        throw Unsupported.notLocal("System.enqueueJob()");
+    }
+
+    /** Apex {@code System.enqueueJob(queueable, delay)}: delayed enqueue. */
+    public static String enqueueJob(Object queueable, Integer delay) {
+        throw Unsupported.notLocal("System.enqueueJob()");
+    }
+
+    /** Apex {@code System.abortJob(jobId)}: aborts a scheduled/queued job on the platform. */
+    public static void abortJob(String jobId) {
+        throw Unsupported.notLocal("System.abortJob()");
+    }
+
+    // --- Execution-context probes -------------------------------------------------------------
+    // Locally we run domain logic directly, never inside an async/scheduled execution context, so
+    // each of these is honestly false (mirrors Test.isRunningTest()). Production code that guards
+    // on the context (e.g. "skip callouts when in a future") takes the not-in-that-context branch.
+
+    /** Apex {@code System.isFuture()}: locally never inside a future, so honestly false. */
+    public static boolean isFuture() {
+        return false;
+    }
+
+    /** Apex {@code System.isBatch()}: locally never inside a batch, so honestly false. */
+    public static boolean isBatch() {
+        return false;
+    }
+
+    /** Apex {@code System.isQueueable()}: locally never inside a queueable, so honestly false. */
+    public static boolean isQueueable() {
+        return false;
+    }
+
+    /** Apex {@code System.isScheduled()}: locally never inside a scheduled job, so honestly false. */
+    public static boolean isScheduled() {
+        return false;
+    }
+
+    /** Apex {@code System.currentPageReference()}: no Visualforce page context locally -> null. */
+    public static PageReference currentPageReference() {
+        return null;
+    }
+
     public static void assertTrue(boolean condition) {
         if (!condition) {
             throw new AssertException("Assertion Failed");
