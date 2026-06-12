@@ -110,8 +110,9 @@ final class Workspace {
             javaFiles.add(javaFile.toString());
         }
         Map<String, Map<String, String>> memberIdx = memberIndex(decls);
+        Map<String, Map<String, String>> memberTyp = memberTypes(decls);
         for (ClassDecl d : decls) {
-            Transpiler.Result r = Transpiler.transpile(d, userClasses, schema, typedSObjects, memberIdx);
+            Transpiler.Result r = Transpiler.transpile(d, userClasses, schema, typedSObjects, memberIdx, memberTyp);
             Path javaFile = cacheDir.resolve(d.name() + ".java");
             Files.writeString(javaFile, r.source());
             javaFiles.add(javaFile.toString());
@@ -159,6 +160,23 @@ final class Workspace {
                 indexFields(inner, idx); // indexed by its simple name (matched as Outer.Inner too)
             }
         }
+    }
+
+    /**
+     * className -> (lowercase member -> declared Apex type), built from EVERY class (and its
+     * inner classes) in the compile set: fields, method return types, and `(method)#i` param
+     * types. The type sibling of {@link #memberIndex}: it lets the transpiler's central typer
+     * resolve CROSS-class member types — a field/method/param of another class in the
+     * compilation — not just the one class currently being emitted (which alone left the typer
+     * blind to `other.field.SomeSObjectField__c`, `other.method() + x`, cross-class Decimal
+     * params, etc.). Population is delegated to the same routine the per-class index uses (DRY).
+     */
+    static Map<String, Map<String, String>> memberTypes(List<ClassDecl> decls) {
+        Map<String, Map<String, String>> idx = new HashMap<>();
+        for (ClassDecl d : decls) {
+            Transpiler.populateMemberTypes(d, idx);
+        }
+        return idx;
     }
 
     /**
@@ -427,8 +445,9 @@ final class Workspace {
         // target transpiled with a line map (to map its javac lines back to .cls);
         // direct deps transpiled plainly, only so their types/members resolve.
         Map<String, Map<String, String>> memberIdx = memberIndex(decls);
+        Map<String, Map<String, String>> memberTyp = memberTypes(decls);
         Transpiler.Result r = Transpiler.transpileWithLines(
-            cls, userClasses, schema, typedSObjects, parsed.stmtLines(), memberIdx);
+            cls, userClasses, schema, typedSObjects, parsed.stmtLines(), memberIdx, memberTyp);
         Path targetJava = cacheDir.resolve(cls.name() + ".java");
         Files.writeString(targetJava, r.source());
         javaFiles.add(targetJava.toString());
@@ -437,7 +456,7 @@ final class Workspace {
                 continue;
             }
             try {
-                String depSrc = Transpiler.transpile(d, userClasses, schema, typedSObjects, memberIdx).source();
+                String depSrc = Transpiler.transpile(d, userClasses, schema, typedSObjects, memberIdx, memberTyp).source();
                 Path jf = cacheDir.resolve(d.name() + ".java");
                 Files.writeString(jf, depSrc);
                 javaFiles.add(jf.toString());

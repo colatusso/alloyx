@@ -134,20 +134,26 @@ final class Transpiler {
     // resolves case-insensitively (Apex: incomingItem.Name == incomingItem.name)
     private final java.util.Map<String, java.util.Map<String, String>> memberIndex;
     // class name -> (lowercase member -> declared Apex type): fields, method return types and
-    // param types of the class being transpiled (+ inners), so the central typer can type a
-    // same-class field read / method call and coerce a Decimal-param argument.
-    private final java.util.Map<String, java.util.Map<String, String>> memberTypes = new java.util.HashMap<>();
+    // param types of EVERY class in the compile set (seeded from the global index), so the central
+    // typer can type a CROSS-class field read / method call and coerce a Decimal-param argument —
+    // not just the one class being emitted. The current class's entries are re-seeded (and so win)
+    // in indexMemberTypes when emission starts.
+    private final java.util.Map<String, java.util.Map<String, String>> memberTypes;
     // the one source of truth for static expression typing (see ExprTyper); shares this
     // Transpiler's live locals map and a view of the current class body's fields.
     private final ExprTyper typer;
 
     private Transpiler(Set<String> userClasses, SchemaProvider schema, Set<String> typedSObjects,
-                       java.util.Map<String, java.util.Map<String, String>> memberIndex) {
+                       java.util.Map<String, java.util.Map<String, String>> memberIndex,
+                       java.util.Map<String, java.util.Map<String, String>> memberTypes) {
         this.userClasses = userClasses;
         this.schema = schema;
         this.typedSObjects = typedSObjects;
         this.memberIndex = memberIndex;
-        this.typer = new ExprTyper(schema, typedSObjects, userClasses, innerTypes, memberTypes,
+        // Copy the global member-type index so the per-class re-seed (indexMemberTypes) can replace
+        // the current class's entry without mutating the shared map other Transpilers read from.
+        this.memberTypes = new java.util.HashMap<>(memberTypes);
+        this.typer = new ExprTyper(schema, typedSObjects, userClasses, innerTypes, this.memberTypes,
             locals, () -> fieldTypes);
     }
 
@@ -186,13 +192,57 @@ final class Transpiler {
                 }
                 String parent = sObjectTypeOf(p.target());
                 if (parent == null) {
-                    yield null;
+                    // The target is a user-class instance whose field is sObject-typed
+                    // (rec.config where rec:EventRecord and config:Config__c). The schema
+                    // chain can't see it; the member-type index can (now cross-class).
+                    yield userClassMemberSObject(p);
                 }
                 String ft = schema.fieldType(parent, p.name());
                 yield ft != null && !SCALARS.contains(ft) ? ft : null; // a relationship field
             }
             default -> null;
         };
+    }
+
+    // The sObject API name of `target.field` when `target` is a known user-class instance and
+    // `field` is declared an sObject type on it (via the cross-class member-type index), else null.
+    // This is what lets a chained read/write `rec.config.Endpoint__c` resolve its sObject parent
+    // when the field lives on ANOTHER class in the compilation.
+    private String userClassMemberSObject(Prop p) {
+        String declared = typer.typeOf(p.target());
+        if (declared == null || !userClasses.contains(base(declared))) {
+            return null;
+        }
+        String ft = memberType(base(declared), p.name());
+        return ft != null && isSObjectName(base(ft)) ? base(ft) : null;
+    }
+
+    // The declared Apex type of `target.field` when `target` is a known user-class instance and
+    // `field` is one of its members (via the cross-class member-type index), else null. Drives the
+    // Decimal-widen on an Assign-to-Prop whose target is another class's field (cart.cost = 333).
+    // Excludes a `this`-rooted target: that's already handled by the field-local widen paths.
+    private String propFieldType(Prop p) {
+        if (p.target() instanceof Name tn && tn.ident().equals("this")) {
+            return null;
+        }
+        String declared = typer.typeOf(p.target());
+        if (declared == null || !userClasses.contains(base(declared))) {
+            return null;
+        }
+        return memberType(base(declared), p.name());
+    }
+
+    // The declared Apex type of a member (case-insensitive) on a known user class, via the
+    // cross-class member-type index — mirrors ExprTyper.memberType, used by the emission paths.
+    private String memberType(String klass, String member) {
+        if (klass == null) {
+            return null;
+        }
+        java.util.Map<String, String> m = memberTypes.get(klass);
+        if (m == null && klass.contains(".")) {
+            m = memberTypes.get(klass.substring(klass.lastIndexOf('.') + 1)); // Outer.Inner -> Inner
+        }
+        return m == null ? null : m.get(member.toLowerCase(java.util.Locale.ROOT));
     }
 
     static Result transpile(ClassDecl cls) {
@@ -212,20 +262,39 @@ final class Transpiler {
         return transpile(cls, userClasses, schema, typedSObjects, java.util.Map.of());
     }
 
+    // Retrocompat: callers without a global member-type index build a single-class one from `cls`,
+    // preserving today's behavior (the typer sees only the class being emitted). The full
+    // cross-class index comes in via the overload below, fed by Workspace.memberTypes(allDecls).
     static Result transpile(ClassDecl cls, Set<String> userClasses, SchemaProvider schema,
                             Set<String> typedSObjects,
                             java.util.Map<String, java.util.Map<String, String>> memberIndex) {
-        return new Transpiler(userClasses, schema, typedSObjects, memberIndex).emitClass(cls);
+        return transpile(cls, userClasses, schema, typedSObjects, memberIndex, singleMemberTypes(cls));
+    }
+
+    static Result transpile(ClassDecl cls, Set<String> userClasses, SchemaProvider schema,
+                            Set<String> typedSObjects,
+                            java.util.Map<String, java.util.Map<String, String>> memberIndex,
+                            java.util.Map<String, java.util.Map<String, String>> memberTypes) {
+        return new Transpiler(userClasses, schema, typedSObjects, memberIndex, memberTypes).emitClass(cls);
     }
 
     // Same as transpile, but builds the source map (generated-Java line -> Apex line)
     // from the parser's statement lines. Used by `allx check`.
     static Result transpileWithLines(ClassDecl cls, Set<String> userClasses, SchemaProvider schema,
                                      Set<String> typedSObjects, java.util.Map<Stmt, Integer> stmtLines,
-                                     java.util.Map<String, java.util.Map<String, String>> memberIndex) {
-        Transpiler t = new Transpiler(userClasses, schema, typedSObjects, memberIndex);
+                                     java.util.Map<String, java.util.Map<String, String>> memberIndex,
+                                     java.util.Map<String, java.util.Map<String, String>> memberTypes) {
+        Transpiler t = new Transpiler(userClasses, schema, typedSObjects, memberIndex, memberTypes);
         t.stmtLines = stmtLines;
         return t.emitClass(cls);
+    }
+
+    // The member-type index for a SINGLE class (+ its inners) — the retrocompat default when no
+    // cross-class index is supplied. Same population routine as the global one, over one decl.
+    private static java.util.Map<String, java.util.Map<String, String>> singleMemberTypes(ClassDecl cls) {
+        java.util.Map<String, java.util.Map<String, String>> m = new java.util.HashMap<>();
+        populateMemberTypes(cls, m);
+        return m;
     }
 
     private Result emitClass(ClassDecl cls) {
@@ -269,14 +338,25 @@ final class Transpiler {
         }
     }
 
-    // Index each class's members (fields + method return types + param types) by lowercase
-    // name, keyed by class simple name, so the central typer can type a same-class field read
-    // / method call and coerce a Decimal-param call argument. Recurses into inners (indexed by
-    // simple name, matched as Outer.Inner too). Param types use a `(name)` key to avoid
-    // colliding with a same-named field/method; the lookup the typer needs is the return type.
+    // Seed this Transpiler's member-type index with the class being emitted (+ its inners) on top
+    // of whatever was pre-seeded from the global index. The CURRENT class's entries must WIN over a
+    // pre-seeded copy (same simple name across the compile set is possible — Apex has no packages),
+    // so the current class's map is rebuilt fresh rather than left as the shared global instance.
     private void indexMemberTypes(ClassDecl cls) {
+        memberTypes.put(cls.name(), new java.util.HashMap<>());
+        populateMemberTypes(cls, memberTypes);
+    }
+
+    // Index a class's members (fields + method return types + param types) by lowercase name,
+    // keyed by class simple name, into `into`, so the central typer can type a field read / method
+    // call and coerce a Decimal-param call argument. Recurses into inners (indexed by simple name,
+    // matched as Outer.Inner too). Param types use a `(name)#i` key to avoid colliding with a
+    // same-named field/method; the lookup the typer needs by name is the return type. Static so
+    // Workspace can build the SAME index over EVERY class in the compile set (cross-class typing).
+    static void populateMemberTypes(ClassDecl cls,
+            java.util.Map<String, java.util.Map<String, String>> into) {
         java.util.Map<String, String> m =
-            memberTypes.computeIfAbsent(cls.name(), k -> new java.util.HashMap<>());
+            into.computeIfAbsent(cls.name(), k -> new java.util.HashMap<>());
         for (Field f : cls.fields()) {
             m.putIfAbsent(f.name().toLowerCase(java.util.Locale.ROOT), f.type());
         }
@@ -291,7 +371,7 @@ final class Transpiler {
                 m.putIfAbsent("(" + mn + ")#" + i, md.params().get(i).type());
             }
         }
-        for (ClassDecl inner : cls.inners()) indexMemberTypes(inner);
+        for (ClassDecl inner : cls.inners()) populateMemberTypes(inner, into);
     }
 
     // The declared Apex type of param #index of a bare same-class method (by lowercase method
@@ -505,6 +585,13 @@ final class Transpiler {
                     // Apex widens Integer to Decimal on assignment; Java needs it explicit
                     sb.append(indent).append(dnm.ident()).append(" = ")
                       .append(coerceDecimal(locals.get(dnm.ident()), a.value())).append(";\n");
+                } else if (a.target() instanceof Prop pp && propFieldType(pp) != null
+                        && isIntegerExpr(a.value())
+                        && mapType(propFieldType(pp)).equals("Decimal")) {
+                    // cross-class user field of Decimal type (cart.cost = 333): widen the Integer,
+                    // now that the member-type index makes the field's declared type resolvable
+                    sb.append(indent).append(emitExpr(a.target())).append(" = ")
+                      .append(coerceDecimal(propFieldType(pp), a.value())).append(";\n");
                 } else {
                     sb.append(indent).append(emitExpr(a.target())).append(" = ")
                       .append(emitExpr(a.value())).append(";\n");
