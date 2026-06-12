@@ -3,7 +3,9 @@
 package alloyx.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
 
@@ -51,5 +53,80 @@ class MapTest {
 
         assertEquals(1, byId.size());
         assertSame(a, byId.get("a02AAA"));
+    }
+
+    @Test
+    void values_returnsAlloyxListWithAllValues() {
+        // Apex Map.values() returns List<V>. Our override must hand back an alloyx List (so a
+        // `List<V> l = m.values();` assignment in generated Java compiles) holding every value.
+        Map<String, Integer> m = new Map<>();
+        m.put("a", 1);
+        m.put("b", 2);
+        m.put("c", 3);
+
+        Object values = m.values();
+        assertTrue(values instanceof List, "values() must return an alloyx List, got " + values.getClass());
+
+        @SuppressWarnings("unchecked")
+        List<Integer> list = (List<Integer>) values;
+        assertEquals(3, list.size());
+        assertTrue(list.contains(1));
+        assertTrue(list.contains(2));
+        assertTrue(list.contains(3));
+    }
+
+    @Test
+    void keySet_returnsAlloyxSetWithAllKeys() {
+        // Apex Map.keySet() returns Set<K>. Our override must hand back an alloyx Set holding
+        // every key (so a `Set<K> ks = m.keySet();` assignment in generated Java compiles).
+        Map<String, Integer> m = new Map<>();
+        m.put("a", 1);
+        m.put("b", 2);
+        m.put("c", 3);
+
+        Object keys = m.keySet();
+        assertTrue(keys instanceof Set, "keySet() must return an alloyx Set, got " + keys.getClass());
+
+        @SuppressWarnings("unchecked")
+        Set<String> set = (Set<String>) keys;
+        assertEquals(3, set.size());
+        assertTrue(set.contains("a"));
+        assertTrue(set.contains("b"));
+        assertTrue(set.contains("c"));
+    }
+
+    @Test
+    void values_isSnapshot_mutatingReturnedListDoesNotChangeMap() {
+        // Apex semantics: values() is a snapshot, not a live view. Mutating the returned List
+        // must not touch the map (unlike HashMap.values(), whose remove() writes through).
+        Map<String, Integer> m = new Map<>();
+        m.put("a", 1);
+        m.put("b", 2);
+
+        List<Integer> list = m.values();
+        list.clear();
+        list.add(99);
+
+        assertEquals(2, m.size());
+        assertEquals(Integer.valueOf(1), m.get("a"));
+        assertEquals(Integer.valueOf(2), m.get("b"));
+    }
+
+    @Test
+    void keySet_isSnapshot_mutatingReturnedSetDoesNotChangeMap() {
+        // Apex semantics: keySet() is a snapshot. Removing from it must not drop the map entry
+        // (unlike HashMap.keySet(), whose remove() writes through to the map).
+        Map<String, Integer> m = new Map<>();
+        m.put("a", 1);
+        m.put("b", 2);
+
+        Set<String> keys = m.keySet();
+        keys.remove("a");
+        keys.add("z");
+
+        assertEquals(2, m.size());
+        assertTrue(m.containsKey("a"));
+        assertTrue(m.containsKey("b"));
+        assertFalse(m.containsKey("z"));
     }
 }

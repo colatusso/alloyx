@@ -275,4 +275,44 @@ class CollectionMethodTypingTest {
         Object v = Workspace.compile(List.of(p)).load("Sum").getMethod("go").invoke(null);
         assertEquals(0, ((alloyx.runtime.Decimal) v).compareTo(alloyx.runtime.Decimal.valueOf("30")));
     }
+
+    @Test
+    void valuesAssignedToList_compilesAndRuns() throws Exception {
+        // List<Inv__c> l = m.values(); — values() is typed List<Inv__c>, so the assignment to an
+        // alloyx List<Inv__c> must compile (the override returns an alloyx List, not a HashMap view)
+        // and l.size() must reflect every value.
+        Path p = probe("Vals", """
+            public class Vals {
+                public static Integer go() {
+                    Map<Id, Inv__c> m = new Map<Id, Inv__c>();
+                    m.put('1', new Inv__c(Total__c = 10));
+                    m.put('2', new Inv__c(Total__c = 20));
+                    List<Inv__c> l = m.values();
+                    return l.size();
+                }
+            }
+            """);
+        Object v = Workspace.compile(List.of(p)).load("Vals").getMethod("go").invoke(null);
+        assertEquals(2, ((Number) v).intValue());
+    }
+
+    @Test
+    void keySetAssignedToSet_compilesAndRuns() throws Exception {
+        // Set<Id> ks = m.keySet(); — keySet() is typed Set<Id>, so the assignment to an alloyx
+        // Set<Id> must compile (the override returns an alloyx Set, not a HashMap view) and
+        // ks.size() must reflect every key.
+        Path p = probe("Keys", """
+            public class Keys {
+                public static Integer go() {
+                    Map<Id, Inv__c> m = new Map<Id, Inv__c>();
+                    m.put('1', new Inv__c(Total__c = 10));
+                    m.put('2', new Inv__c(Total__c = 20));
+                    Set<Id> ks = m.keySet();
+                    return ks.size();
+                }
+            }
+            """);
+        Object v = Workspace.compile(List.of(p)).load("Keys").getMethod("go").invoke(null);
+        assertEquals(2, ((Number) v).intValue());
+    }
 }

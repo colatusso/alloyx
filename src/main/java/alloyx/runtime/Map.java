@@ -24,4 +24,26 @@ public class Map<K, V> extends java.util.HashMap<K, V> {
     public Map(java.util.Map<? extends K, ? extends V> source) {
         super(source);
     }
+
+    /**
+     * Apex {@code values()} returns a {@code List<V>} snapshot — a fresh list, not a live view.
+     * HashMap's inherited {@code values()} hands back a write-through {@code Collection<V>} view,
+     * which (a) isn't an alloyx List so generated {@code List<V> l = m.values();} won't compile,
+     * and (b) wouldn't be a snapshot. Materialize an alloyx copy. Covariant override: alloyx List
+     * is-a java.util.Collection.
+     */
+    @Override
+    public List<V> values() {
+        return new List<>(super.values());
+    }
+
+    /**
+     * Apex {@code keySet()} returns a {@code Set<K>} snapshot. Same reasoning as {@link #values()}:
+     * materialize an alloyx Set copy so the assignment compiles and mutation doesn't write through.
+     * Covariant override: alloyx Set is-a java.util.Set.
+     */
+    @Override
+    public Set<K> keySet() {
+        return new Set<>(super.keySet());
+    }
 }
