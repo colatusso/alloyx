@@ -85,10 +85,12 @@ class ProjectRootCacheTest {
         assertEquals(dir.resolve(".apexcache").toRealPath(), resolved.toRealPath(),
             "cache must anchor at the alloyx.json root, not the .cls dir");
 
-        Workspace.check(target, null, resolved);
-        // generated typed Account proves the schema at the root was found and used
-        assertTrue(Files.exists(resolved.resolve("Account.java")),
-            "the root-synced schema must type Account (generated class in the root cache)");
+        // a.Name type-checks clean ONLY if the root-synced schema typed Account; an untyped
+        // SObject would flag the field. Zero diagnostics proves the schema was found and used.
+        // (We no longer assert a generated Account.java in the cache: check now emits into a
+        // private temp dir for isolation, so the project cache holds only the synced schema.)
+        assertTrue(Workspace.check(target, null, resolved).isEmpty(),
+            "the root-synced schema must type Account so a.Name resolves clean");
     }
 
     /** With no alloyx.json, an existing .apexcache dir above the target marks the root. */
@@ -102,9 +104,10 @@ class ProjectRootCacheTest {
         Path resolved = Config.cacheDir(target);
         assertEquals(dir.resolve(".apexcache").toRealPath(), resolved.toRealPath(),
             "an existing .apexcache above the .cls must mark the root");
-        Workspace.check(target, null, resolved);
-        assertTrue(Files.exists(resolved.resolve("Account.java")),
-            "schema in the discovered .apexcache must type Account");
+        // typed Account => a.Name resolves clean; check emits into a private temp dir now,
+        // so the discovered cache holds only the synced schema (see the sibling test above).
+        assertTrue(Workspace.check(target, null, resolved).isEmpty(),
+            "schema in the discovered .apexcache must type Account so a.Name resolves clean");
     }
 
     /** No marker anywhere: fall back to CWD-relative .apexcache (retrocompat for flat layouts). */

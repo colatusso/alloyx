@@ -342,6 +342,26 @@ final class Workspace {
         Files.createDirectories(cacheDir);
         var schema = schemaFor(cacheDir);
 
+        // Hermetic output: emit this check's .java/.class into a FRESH per-invocation dir, never
+        // the shared cacheDir. The shared dir accumulates .java/.class from earlier check/run/eval
+        // invocations (possibly an older transpiler, or a class whose .cls has since changed); any
+        // of those reachable to javac (stale .class on a classpath, an inferred sourcepath) silently
+        // taints the result — phantom errors, or errors masked by an outdated signature. A private
+        // dir compiled in isolation depends ONLY on the current sources. The synced schema still
+        // reads from cacheDir/schema (above), so typed sObjects keep working exactly as before.
+        Path outDir = Files.createTempDirectory("alloyx-check");
+        try {
+            return checkInto(target, src, parsed, cls, schema, cacheDir, outDir);
+        } finally {
+            deleteRecursively(outDir);
+        }
+    }
+
+    // The check body, writing all generated .java and javac output into the isolated outDir.
+    // cacheDir is retained only for the schema location and the no-schema warning message.
+    private static List<Diag> checkInto(Path target, String src, Parser.Parsed parsed, ClassDecl cls,
+            alloyx.runtime.SchemaCache schema, Path cacheDir, Path outDir) throws Exception {
+
         // Compile the open class together with the classes it references DIRECTLY
         // (its superclass + the workspace classes used in its body) — first level
         // only. Without them every inherited field/method and every external type
@@ -441,7 +461,7 @@ final class Workspace {
 
         List<String> javaFiles = new ArrayList<>();
         for (String name : typedSObjects) {
-            Path jf = cacheDir.resolve(name + ".java");
+            Path jf = outDir.resolve(name + ".java");
             Files.writeString(jf, SObjectClassGen.generate(name, schema.fields(name), typedSObjects));
             javaFiles.add(jf.toString());
         }
@@ -451,7 +471,7 @@ final class Workspace {
         Map<String, Map<String, String>> memberTyp = memberTypes(decls);
         Transpiler.Result r = Transpiler.transpileWithLines(
             cls, userClasses, schema, typedSObjects, parsed.stmtLines(), memberIdx, memberTyp);
-        Path targetJava = cacheDir.resolve(cls.name() + ".java");
+        Path targetJava = outDir.resolve(cls.name() + ".java");
         Files.writeString(targetJava, r.source());
         javaFiles.add(targetJava.toString());
         for (ClassDecl d : decls) {
@@ -460,7 +480,7 @@ final class Workspace {
             }
             try {
                 String depSrc = Transpiler.transpile(d, userClasses, schema, typedSObjects, memberIdx, memberTyp).source();
-                Path jf = cacheDir.resolve(d.name() + ".java");
+                Path jf = outDir.resolve(d.name() + ".java");
                 Files.writeString(jf, depSrc);
                 javaFiles.add(jf.toString());
             } catch (RuntimeException | StackOverflowError skip) {
@@ -475,7 +495,7 @@ final class Workspace {
         var collected = new javax.tools.DiagnosticCollector<javax.tools.JavaFileObject>();
         var fm = compiler.getStandardFileManager(collected, null, java.nio.charset.StandardCharsets.UTF_8);
         String classpath = java.lang.System.getProperty("java.class.path");
-        List<String> options = List.of("-cp", classpath, "-d", cacheDir.toString());
+        List<String> options = List.of("-cp", classpath, "-d", outDir.toString());
         compiler.getTask(null, fm, collected, options, null,
             fm.getJavaFileObjectsFromStrings(javaFiles)).call();
         fm.close();
@@ -557,6 +577,25 @@ final class Workspace {
     private static String classNameOf(Path clsFile) {
         String n = clsFile.getFileName().toString();
         return n.endsWith(".cls") ? n.substring(0, n.length() - ".cls".length()) : n;
+    }
+
+    // Best-effort cleanup of a check's private temp output dir (depth-first so dirs empty before
+    // delete). A leftover temp on a delete failure is harmless — it never feeds back into a check.
+    private static void deleteRecursively(Path dir) {
+        if (!Files.exists(dir)) {
+            return;
+        }
+        try (Stream<Path> s = Files.walk(dir)) {
+            s.sorted(java.util.Comparator.reverseOrder()).forEach(p -> {
+                try {
+                    Files.delete(p);
+                } catch (IOException ignored) {
+                    // leave it; the OS temp dir is reclaimed eventually
+                }
+            });
+        } catch (IOException ignored) {
+            // couldn't walk: nothing to clean up that matters
+        }
     }
 
     /** A single file compiles alone; a directory compiles all its .cls together. */
