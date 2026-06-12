@@ -75,7 +75,7 @@ let cliMissingShown = false;
 
 // Lowest CLI version this extension is built against. Bumped at release time when
 // the extension starts to rely on a newer CLI feature/output. Warning-only.
-const MIN_CLI_VERSION = "0.1.1";
+const MIN_CLI_VERSION = "0.2.0";
 let cliOutdatedShown = false;
 
 function notifyCliMissing(): void {
