@@ -237,7 +237,7 @@ class AmbiguityAndCollisionTest {
         ClassDecl b = Parser.parse(java.nio.file.Files.readString(outerB));
         var types = Workspace.memberTypes(List.of(a, b));
         assertEquals(AMBIGUOUS_MARKER, types.get("Sup").keySet().stream().findFirst().orElse(null));
-        ExprTyper typer = new ExprTyper((o, f) -> null, Set.of(), Set.of("OuterA", "OuterB"),
+        ExprTyper typer = new ExprTyper((o, f) -> null, new TypedSObjects(Set.of()), Set.of("OuterA", "OuterB"),
             Set.of("Sup", "Sub", "OuterA.Sup", "OuterA.Sub", "OuterB.Sup"), types,
             new java.util.HashMap<>(), () -> new java.util.HashMap<>(), Set.of());
         assertEquals("String", typer.memberType("OuterA.Sub", "tag"));

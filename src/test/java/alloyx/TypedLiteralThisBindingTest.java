@@ -298,4 +298,63 @@ class TypedLiteralThisBindingTest {
         SObject row = (SObject) k.getMethod("toSObject").invoke(inst);
         assertEquals("vd-1", row.get("Id"));
     }
+
+    @Test
+    void staticFactory_readsStaticFieldInTypedLiteral_compilesAndRuns() throws Exception {
+        // Fixture-factory pattern: a STATIC method builds a typed literal whose arg reads a STATIC
+        // field. Inside a static method there's no enclosing instance, so the rewrite must NOT emit
+        // `Cls.this.PREFIX` (javac: "non-static variable this cannot be referenced from a static
+        // context") — a bare current-class field read in a static method is necessarily a STATIC
+        // field, qualified as `Cls.PREFIX` (still escapes the anon-block token shadowing).
+        Path p = probe("StaticFactory", """
+            public class StaticFactory {
+                public static String PREFIX = 'pre-';
+                public static Item__c make(String suffix) {
+                    return new Item__c(Name = PREFIX + suffix);
+                }
+            }
+            """);
+        Workspace.Compiled c = Workspace.compile(List.of(p));
+        Class<?> k = c.load("StaticFactory");
+        SObject row = (SObject) k.getMethod("make", String.class).invoke(null, "x");
+        assertEquals("pre-x", row.get("Name"));
+    }
+
+    @Test
+    void staticMethod_localArgStaysBare_andWorks() throws Exception {
+        // A LOCAL feeding an arg value in a STATIC method must stay bare (no qualification at all).
+        Path p = probe("StaticLocal", """
+            public class StaticLocal {
+                public static String PREFIX = 'pre-';
+                public static Item__c make() {
+                    String name = 'Local';
+                    return new Item__c(Name = name);
+                }
+            }
+            """);
+        Workspace.Compiled c = Workspace.compile(List.of(p));
+        Class<?> k = c.load("StaticLocal");
+        SObject row = (SObject) k.getMethod("make").invoke(null);
+        assertEquals("Local", row.get("Name"));
+    }
+
+    @Test
+    void instanceMethod_readsStaticFieldInTypedLiteral_compilesAndRuns() throws Exception {
+        // A STATIC field read from an INSTANCE method's typed literal: `Cls.this.PREFIX` is legal
+        // Java but odd; qualifying a static field as `Cls.PREFIX` is correct in both contexts. Must
+        // still escape the anon-block token shadowing and round-trip.
+        Path p = probe("InstanceStatic", """
+            public class InstanceStatic {
+                public static String PREFIX = 'pre-';
+                public Item__c build(String suffix) {
+                    return new Item__c(Name = PREFIX + suffix);
+                }
+            }
+            """);
+        Workspace.Compiled c = Workspace.compile(List.of(p));
+        Class<?> k = c.load("InstanceStatic");
+        Object inst = k.getDeclaredConstructor().newInstance();
+        SObject row = (SObject) k.getMethod("build", String.class).invoke(inst, "y");
+        assertEquals("pre-y", row.get("Name"));
+    }
 }

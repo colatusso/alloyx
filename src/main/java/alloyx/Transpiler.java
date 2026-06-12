@@ -172,8 +172,10 @@ final class Transpiler {
     private final Set<String> userClasses;
     private final SchemaProvider schema;
     // sObjects with a generated typed class (described via sync); empty -> everything
-    // stays the generic dynamic SObject, byte-for-byte the pre-typing behavior
-    private final Set<String> typedSObjects;
+    // stays the generic dynamic SObject, byte-for-byte the pre-typing behavior. Wrapped in a
+    // case-INSENSITIVE view (Apex isn't case-sensitive): the set holds only the canonical casing,
+    // so a type written in another case (`account acc;`) must still resolve and emit `Account`.
+    private final TypedSObjects typedSObjects;
     // light type tracking so sObject field access (a.Name) becomes a.get("Name").
     // fieldTypes is swapped per class body (outer vs inner) as emission descends.
     private java.util.Map<String, String> fieldTypes = new java.util.HashMap<>();
@@ -190,6 +192,15 @@ final class Transpiler {
     // must be qualified to the enclosing instance — but ONLY when no param/local of this name shadows
     // it (Apex: a param/local wins over a field). This set is that shadow guard. See qualifyEnclosing.
     private final Set<String> methodScopeLocals = new java.util.HashSet<>();
+    // whether the method whose body is being emitted is STATIC. A static method has no enclosing
+    // instance, so qualifyEnclosing must never emit `<Cls>.this` inside it (javac: "non-static
+    // variable this cannot be referenced from a static context") — a bare current-class field read
+    // there is necessarily a STATIC field, qualified as `<Cls>.<name>`. Rebuilt per method.
+    private boolean currentMethodStatic = false;
+    // names of the current class body's STATIC fields (rebuilt per class body, in fieldTypes order).
+    // A static field is qualified `<Cls>.<name>` in BOTH static and instance methods (correct Java
+    // for a static; also escapes the typed-literal anon block's token shadowing) — see qualifyEnclosing.
+    private Set<String> staticFields = new java.util.HashSet<>();
     private String currentReturnType = "void";
     // monotonic id for the synthetic lambda parameter that carries an evaluated-once safe-nav
     // target (a?.b -> Safe.nav(a, __sn0 -> __sn0.b)); a counter keeps nested chains' params distinct.
@@ -224,12 +235,14 @@ final class Transpiler {
                        java.util.Map<String, java.util.Map<String, String>> memberTypes) {
         this.userClasses = userClasses;
         this.schema = schema;
-        this.typedSObjects = typedSObjects;
+        // wrap the canonical-cased set in a case-insensitive view (Apex isn't case-sensitive) and
+        // share the SAME instance with the typer, so both resolve type names identically.
+        this.typedSObjects = new TypedSObjects(typedSObjects);
         this.memberIndex = memberIndex;
         // Copy the global member-type index so the per-class re-seed (indexMemberTypes) can replace
         // the current class's entry without mutating the shared map other Transpilers read from.
         this.memberTypes = new java.util.HashMap<>(memberTypes);
-        this.typer = new ExprTyper(schema, typedSObjects, userClasses, innerTypes, this.memberTypes,
+        this.typer = new ExprTyper(schema, this.typedSObjects, userClasses, innerTypes, this.memberTypes,
             locals, () -> fieldTypes, BUILTIN_TYPE_NAMES);
     }
 
@@ -239,12 +252,22 @@ final class Transpiler {
 
     /** This sObject has a generated typed class (so field access is a typed getter/setter). */
     private boolean isTyped(String base) {
-        return base != null && typedSObjects.contains(base);
+        return typedSObjects.has(base);
+    }
+
+    /**
+     * The CANONICAL-cased name of a typed sObject (so emitted Java links against the generated
+     * `class Account`), or the input unchanged when it isn't a typed sObject. Apex is case-insensitive,
+     * so a `new account(...)` / `account[]` written in any case must emit the org casing.
+     */
+    private String typedName(String base) {
+        String canon = typedSObjects.canonical(base);
+        return canon != null ? canon : base;
     }
 
     /** This name denotes an sObject — either a generated typed one or the generic SObject. */
     private boolean isSObjectName(String base) {
-        return typedSObjects.contains(base) || mapType(base).equals("SObject");
+        return typedSObjects.has(base) || mapType(base).equals("SObject");
     }
 
     // the sObject API name an expression evaluates to (Account, Contact, ...), or null.
@@ -671,6 +694,12 @@ final class Transpiler {
         // this.<field> / locals view agrees with the member-type index — see qualifyInnerType.
         for (Field f : cls.fields()) myFields.put(f.name(), qualifyInnerType(f.type()));
         this.fieldTypes = myFields;
+        // this class body's OWN static fields (by name): qualified `<Cls>.<name>` in qualifyEnclosing.
+        // Saved/restored like fieldTypes since inner bodies are emitted within the same Transpiler.
+        Set<String> prevStaticFields = this.staticFields;
+        Set<String> myStaticFields = new java.util.HashSet<>();
+        for (Field f : cls.fields()) if (f.isStatic()) myStaticFields.add(f.name());
+        this.staticFields = myStaticFields;
         String prevClass = typer.currentClass;
         typer.currentClass = cls.name(); // `this`-rooted member typing resolves against this body
 
@@ -750,6 +779,8 @@ final class Transpiler {
             methodScopeLocals.clear();
             for (Param p : m.params()) methodScopeLocals.add(p.name());
             collectDeclaredLocals(m.body(), methodScopeLocals);
+            // a static method has no enclosing instance — qualifyEnclosing must not emit `<Cls>.this`.
+            currentMethodStatic = m.isStatic();
             currentReturnType = isCtor ? "void" : m.returnType();
             // an Apex `abstract` method in a class is bodyless: emit `abstract <ret> name(args);`
             // (Java requires no body and rejects an empty `{ }` for a non-void return).
@@ -783,6 +814,7 @@ final class Transpiler {
 
         sb.append(indent).append("}\n");
         this.fieldTypes = myFields; // restore this body's view for any trailing use
+        this.staticFields = prevStaticFields;
         typer.currentClass = prevClass;
     }
 
@@ -924,8 +956,9 @@ final class Transpiler {
                 // either a SOQL result or a child-relationship collection (ord.Items__r), both
                 // List<SObject>; .many() re-types each row to the typed loop var (Java is invariant,
                 // so a bare List<SObject> can't bind a typed-sObject loop var directly).
+                // canonical class name for the .many() re-type so a lowercase loop type still links
                 String iterable = isTyped(base(fe.type())) && iterableIsSObjectList(fe.iterable())
-                    ? base(fe.type()) + ".many(" + emitExpr(fe.iterable()) + ")"
+                    ? typedName(base(fe.type())) + ".many(" + emitExpr(fe.iterable()) + ")"
                     : emitExpr(fe.iterable());
                 sb.append(indent).append("for (").append(mapType(fe.type())).append(' ')
                   .append(fe.name()).append(" : ").append(iterable).append(") {\n");
@@ -1059,7 +1092,7 @@ final class Transpiler {
         if (base(c.type()).equals("List")) {
             String elem = base(firstGeneric(c.type()));
             if (isTyped(elem)) {
-                return elem + ".many(" + emitExpr(c.expr()) + ")";
+                return typedName(elem) + ".many(" + emitExpr(c.expr()) + ")"; // canonical class name
             }
         }
         String tt = mapType(c.type());
@@ -1257,8 +1290,10 @@ final class Transpiler {
         if (!(p.target() instanceof Name tn) || locals.containsKey(tn.ident())) {
             return null;
         }
-        String type = tn.ident();
-        if (!typedSObjects.contains(type) || schema.fieldType(type, p.name()) == null) {
+        // canonical casing: the field token lives on the generated `class Account`, so a `account.Id`
+        // (lowercase type) must emit `Account.Id`, not `account.Id` (no such class).
+        String type = typedSObjects.canonical(tn.ident());
+        if (type == null || schema.fieldType(type, p.name()) == null) {
             return null;
         }
         return type + "." + schema.canonicalField(type, p.name());
@@ -1810,16 +1845,28 @@ final class Transpiler {
     }
 
     private Expr qualifyEnclosing(Expr e, String cls) {
+        // the qualifier for an UNSHADOWED current-class field read: in a static method (or for a
+        // static field in any method) it's the CLASS — `<Cls>.<name>` (correct Java for a static, and
+        // it still escapes the anon block's token shadowing); in an instance method an instance field
+        // is the enclosing instance — `<Cls>.this.<name>`. `<Cls>.this` itself can't appear in a
+        // static method (no enclosing instance), so a bare `this` there is left unrewritten (defensive
+        // — Apex's parser rejects `this` in a static method, so this can't occur in valid input).
         Expr qualifiedThis = new Name(cls + ".this");
+        Expr classQualifier = new Name(cls);
         return switch (e) {
             // a NESTED typed literal: leave it — emitSObject rewrites its own args (idempotent either
             // way, but stopping here keeps the rewrite shallow and avoids re-walking its subtree).
             case SObjectLit so -> so;
-            // bare `this` as a value, and the `this` rooting `this.field` / `this.m(...)`
-            case Name n when n.ident().equals("this") -> qualifiedThis;
-            // bare field read: qualify only a current-class field that no param/local shadows
+            // bare `this`: only valid in an instance method (-> qualified enclosing); leave bare in a
+            // static method (unreachable in valid Apex) rather than emit an illegal `<Cls>.this`.
+            case Name n when n.ident().equals("this") -> currentMethodStatic ? n : qualifiedThis;
+            // bare field read: qualify only a current-class field that no param/local shadows. A STATIC
+            // field (or any field in a static method) is qualified by the CLASS, an instance field in
+            // an instance method by the enclosing instance.
             case Name n when fieldTypes.containsKey(n.ident()) && !methodScopeLocals.contains(n.ident()) ->
-                new Prop(qualifiedThis, n.ident());
+                (currentMethodStatic || staticFields.contains(n.ident()))
+                    ? new Prop(classQualifier, n.ident())
+                    : new Prop(qualifiedThis, n.ident());
             case Name n -> n;
             case Prop p -> new Prop(qualifyEnclosing(p.target(), cls), p.name(), p.safe());
             case MethodCall mc -> new MethodCall(qualifyEnclosing(mc.target(), cls), mc.name(),
@@ -1850,7 +1897,9 @@ final class Transpiler {
     }
 
     private String emitSObject(SObjectLit so) {
-        String base = base(so.type());
+        // canonical casing for the emitted class name (Apex is case-insensitive): `new account(...)`
+        // must emit `new Account(){{ ... }}` to link against the generated `class Account`.
+        String base = typedName(base(so.type()));
         if (isTyped(base)) {
             // typed: new Account(Name=x) -> new Account(){{ setName(x); }} (setters type-check).
             // Coerce an Integer literal into a Decimal field's type the same way an assignment
@@ -1897,14 +1946,14 @@ final class Transpiler {
             if (COLLECTIONS.contains(base)) {
                 String elem = base(firstGeneric(declaredType));
                 if (isTyped(elem)) {
-                    return elem + ".many(" + emitExpr(init) + ")"; // typed list
+                    return typedName(elem) + ".many(" + emitExpr(init) + ")"; // typed list (canonical)
                 }
                 // untyped list: Database.query already returns List<SObject>, no wrap needed
             } else if (isSObjectName(base)) {
                 // single-row SOQL bound to one sObject (Account a = [SELECT ... LIMIT 1]):
                 // query returns a List, so take the first row — typed via one(), else get(0)
                 return isTyped(base)
-                    ? base + ".one(" + emitExpr(init) + ")"
+                    ? typedName(base) + ".one(" + emitExpr(init) + ")"
                     : emitExpr(init) + ".get(0)";
             }
         }
@@ -1985,7 +2034,10 @@ final class Transpiler {
             return base.contains(".") ? base.substring(base.lastIndexOf('.') + 1) : base;
         }
         if (userClasses.contains(base)) return base;
-        if (typedSObjects.contains(base)) return base; // generated typed sObject class
+        // generated typed sObject class — emit the CANONICAL casing (Apex is case-insensitive, so a
+        // `account` decl resolves here and must emit `Account` to link against `class Account`).
+        String canonicalSObject = typedSObjects.canonical(base);
+        if (canonicalSObject != null) return canonicalSObject;
         // a qualified type A.B whose outer A is a known class: an inner-class reference.
         // Apex inner classes transpile to Java static nested classes, so A.B stays A.B
         // (e.g. SomeProxy.ResponseElement) instead of collapsing to the dynamic SObject.

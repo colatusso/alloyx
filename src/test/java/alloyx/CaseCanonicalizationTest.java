@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Rafael Colatusso
 package alloyx;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import alloyx.runtime.Database;
@@ -11,6 +12,7 @@ import alloyx.runtime.UnconnectedGateway;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -115,5 +117,98 @@ class CaseCanonicalizationTest {
             """);
         var diags = Workspace.check(f, null, dir.resolve(".apexcache"));
         assertTrue(diags.isEmpty(), "expected a clean check, got: " + diags);
+    }
+
+    // ---- case-insensitive typed-sObject resolution (Apex isn't case-sensitive) ----
+    // After canonicalization the set holds ONLY the org casing (Account). A declaration written in
+    // another case — `account acc;`, `new account()`, both legal Apex — must still resolve to that
+    // typed class, and the emitted Java must use the canonical `Account` so it links against the
+    // generated `class Account`. Otherwise the type degrades to the dynamic SObject and cascades
+    // ("Object cannot be converted to ...", "cannot find symbol: method getX()").
+
+    /** A lowercase type declaration + lowercase ctor compiles, runs, and emits canonical `Account`. */
+    @Test
+    void lowercaseTypeDeclAndCtor_compilesRunsAndEmitsCanonical() throws Exception {
+        Path p = dir.resolve("Lower.cls");
+        Files.writeString(p, """
+            public class Lower {
+                public static String build() {
+                    account acc = new account(Name = 'x');
+                    return acc.Name;
+                }
+            }
+            """);
+        Path cache = dir.resolve(".apexcache");
+        Workspace.Compiled c = Workspace.compile(List.of(p), List.of(), cache);
+        Class<?> k = c.load("Lower");
+        assertEquals("x", k.getMethod("build").invoke(null));
+
+        // source-shape: the emitted Java uses the canonical `Account` class (the generated class the
+        // ctor links against), and the lowercase `account` type never leaks through.
+        String emitted = Files.readString(cache.resolve("Lower.java"));
+        assertTrue(emitted.contains("new Account()"), "expected canonical ctor, got:\n" + emitted);
+        assertTrue(!emitted.contains("new account(") && !emitted.contains("account acc"),
+            "lowercase type leaked into the emitted Java:\n" + emitted);
+    }
+
+    /** A lowercase type in a method SIGNATURE (param + return) across classes compiles and links. */
+    @Test
+    void lowercaseTypeInSignature_crossClass() throws Exception {
+        Path gw = dir.resolve("Gateway.cls");
+        Files.writeString(gw, """
+            public class Gateway {
+                public static account tag(account a) {
+                    a.Status__c = 'ok';
+                    return a;
+                }
+            }
+            """);
+        Path caller = dir.resolve("Caller.cls");
+        Files.writeString(caller, """
+            public class Caller {
+                public static String run() {
+                    Account a = new Account(Name = 'y');
+                    Account tagged = Gateway.tag(a);
+                    return tagged.Status__c;
+                }
+            }
+            """);
+        Path cache = dir.resolve(".apexcache");
+        Workspace.Compiled c = Workspace.compile(List.of(gw, caller), List.of(), cache);
+        Class<?> k = c.load("Caller");
+        assertEquals("ok", k.getMethod("run").invoke(null));
+
+        // the signature's lowercase `account` must emit as the canonical `Account` param/return type
+        String emitted = Files.readString(cache.resolve("Gateway.java"));
+        assertTrue(emitted.contains("Account tag(Account a)"),
+            "expected canonical signature, got:\n" + emitted);
+    }
+
+    /** Mixed casings of one object in one file generate ONE class and compile. */
+    @Test
+    void mixedCasingInOneFile_generatesOneClassAndCompiles() throws Exception {
+        Path p = dir.resolve("Mixed.cls");
+        Files.writeString(p, """
+            public class Mixed {
+                public static String build() {
+                    Account upper = new Account(Name = 'U');
+                    account lower = new account(Name = 'L');
+                    return upper.Name + lower.Name;
+                }
+            }
+            """);
+        Path cache = dir.resolve(".apexcache");
+        Workspace.Compiled c = Workspace.compile(List.of(p), List.of(), cache);
+        Class<?> k = c.load("Mixed");
+        assertEquals("UL", k.getMethod("build").invoke(null));
+
+        // exactly one generated sObject class file (canonical Account), not a colliding pair
+        try (var s = Files.list(cache)) {
+            long accountClasses = s.filter(f -> {
+                String n = f.getFileName().toString();
+                return n.equalsIgnoreCase("Account.java");
+            }).count();
+            assertEquals(1, accountClasses, "expected exactly one generated Account.java");
+        }
     }
 }

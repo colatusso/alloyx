@@ -48,7 +48,9 @@ final class ExprTyper {
     private static final Set<String> ARITH = Set.of("+", "-", "*", "/");
 
     private final SchemaProvider schema;
-    private final Set<String> typedSObjects;
+    // case-INSENSITIVE view over the generated typed sObjects (Apex isn't case-sensitive): a type
+    // written in any case resolves to its canonical entry. Shared with the Transpiler.
+    private final TypedSObjects typedSObjects;
     private final Set<String> userClasses;
     private final Set<String> innerTypes;
     // lowercased built-in/native/runtime type names the Transpiler already recognizes (Integer,
@@ -64,7 +66,7 @@ final class ExprTyper {
     private final Map<String, String> locals;
     private final java.util.function.Supplier<Map<String, String>> fieldTypes;
 
-    ExprTyper(SchemaProvider schema, Set<String> typedSObjects, Set<String> userClasses,
+    ExprTyper(SchemaProvider schema, TypedSObjects typedSObjects, Set<String> userClasses,
               Set<String> innerTypes, Map<String, Map<String, String>> memberTypes,
               Map<String, String> locals, java.util.function.Supplier<Map<String, String>> fieldTypes,
               Set<String> builtinTypeNames) {
@@ -89,7 +91,7 @@ final class ExprTyper {
         if (ident == null) {
             return false;
         }
-        if (userClasses.contains(ident) || innerTypes.contains(ident) || typedSObjects.contains(ident)) {
+        if (userClasses.contains(ident) || innerTypes.contains(ident) || typedSObjects.has(ident)) {
             return true;
         }
         return builtinTypeNames.contains(ident.toLowerCase(Locale.ROOT));
@@ -183,7 +185,7 @@ final class ExprTyper {
         // (not a local/instance) and the member is a described field -> the field token's type,
         // so a `new List<Schema.SObjectField>{ Item__c.Id, ... }` literal accepts each element.
         if (p.target() instanceof Name tn && !locals.containsKey(tn.ident())
-                && typedSObjects.contains(tn.ident())
+                && typedSObjects.has(tn.ident())
                 && schema.fieldType(tn.ident(), p.name()) != null) {
             return "Schema.SObjectField";
         }
@@ -381,7 +383,7 @@ final class ExprTyper {
     }
 
     private boolean isSObjectName(String base) {
-        return base != null && (typedSObjects.contains(base)
+        return base != null && (typedSObjects.has(base)
             || (!SCALARS.contains(base) && !userClasses.contains(base)
                 && !innerTypes.contains(base) && !COLLECTION.contains(base)
                 && schema.fieldType(base, "Id") != null));
