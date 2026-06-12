@@ -177,6 +177,11 @@ final class Transpiler {
         return switch (e) {
             case Name n -> {
                 String t = n.ident().equals("this") ? null : locals.get(n.ident());
+                if (t == null && !n.ident().equals("this")) {
+                    // an inherited field read without `this.`: not in locals (only the current
+                    // body's own fields are) — resolve through the member index's extends walk
+                    t = memberType(typer.currentClass, n.ident());
+                }
                 yield t != null && isSObjectName(base(t)) ? base(t) : null;
             }
             case Cast c -> isSObjectName(base(c.type())) ? base(c.type()) : null;
@@ -185,9 +190,14 @@ final class Transpiler {
             case Prop p -> {
                 // this.<field>: resolve to the field's own declared type. Fields are
                 // copied into `locals`, but the target `this` resolves to null above,
-                // so this.lead.CNPJ__c would miss the getter without this.
+                // so this.lead.CNPJ__c would miss the getter without this. An INHERITED
+                // field isn't in locals (only the current body's fields are), so fall
+                // back to the member-type index, which walks the `extends` chain.
                 if (p.target() instanceof Name tn && tn.ident().equals("this")) {
                     String ft0 = locals.get(p.name());
+                    if (ft0 == null) {
+                        ft0 = memberType(typer.currentClass, p.name());
+                    }
                     yield ft0 != null && isSObjectName(base(ft0)) ? base(ft0) : null;
                 }
                 String parent = sObjectTypeOf(p.target());
@@ -232,17 +242,12 @@ final class Transpiler {
         return memberType(base(declared), p.name());
     }
 
-    // The declared Apex type of a member (case-insensitive) on a known user class, via the
-    // cross-class member-type index — mirrors ExprTyper.memberType, used by the emission paths.
+    // The declared Apex type of a member (case-insensitive) on a known user class. Delegates to
+    // the central typer's ONE lookup (DRY) — which walks the `extends` chain to an inherited
+    // member and guards against inheritance cycles — so the emission paths and the typer never
+    // disagree on which member resolves to which type.
     private String memberType(String klass, String member) {
-        if (klass == null) {
-            return null;
-        }
-        java.util.Map<String, String> m = memberTypes.get(klass);
-        if (m == null && klass.contains(".")) {
-            m = memberTypes.get(klass.substring(klass.lastIndexOf('.') + 1)); // Outer.Inner -> Inner
-        }
-        return m == null ? null : m.get(member.toLowerCase(java.util.Locale.ROOT));
+        return typer.memberType(klass, member);
     }
 
     static Result transpile(ClassDecl cls) {
@@ -347,28 +352,53 @@ final class Transpiler {
         populateMemberTypes(cls, memberTypes);
     }
 
+    // Reserved member-index keys (no Apex member can collide: they aren't valid identifiers).
+    // EXTENDS_KEY records the class's superclass simple name so a member lookup can walk the
+    // inheritance chain; CTOR_PARAM is the per-position constructor param type (the ctor itself
+    // carries no return type, so `(new)#i` is the only way a `new Foo(args)` site recovers it).
+    static final String EXTENDS_KEY = "(extends)";
+    private static String ctorParamKey(int i) {
+        return "(new)#" + i;
+    }
+
     // Index a class's members (fields + method return types + param types) by lowercase name,
     // keyed by class simple name, into `into`, so the central typer can type a field read / method
     // call and coerce a Decimal-param call argument. Recurses into inners (indexed by simple name,
     // matched as Outer.Inner too). Param types use a `(name)#i` key to avoid colliding with a
-    // same-named field/method; the lookup the typer needs by name is the return type. Static so
-    // Workspace can build the SAME index over EVERY class in the compile set (cross-class typing).
+    // same-named field/method; the lookup the typer needs by name is the return type. The
+    // superclass simple name is recorded under EXTENDS_KEY so the lookups can climb the chain to
+    // an inherited member. Static so Workspace can build the SAME index over EVERY class in the
+    // compile set (cross-class typing).
     static void populateMemberTypes(ClassDecl cls,
             java.util.Map<String, java.util.Map<String, String>> into) {
         java.util.Map<String, String> m =
             into.computeIfAbsent(cls.name(), k -> new java.util.HashMap<>());
+        // superclass heritage: stored by SIMPLE name (Outer.Inner -> Inner), the same resolution
+        // the rest of the index uses, so the chain walk resolves against the indexed entries.
+        if (cls.superclass() != null) {
+            String sup = base(cls.superclass());
+            if (sup.contains(".")) {
+                sup = sup.substring(sup.lastIndexOf('.') + 1);
+            }
+            m.putIfAbsent(EXTENDS_KEY, sup);
+        }
         for (Field f : cls.fields()) {
             m.putIfAbsent(f.name().toLowerCase(java.util.Locale.ROOT), f.type());
         }
         for (MethodDecl md : cls.methods()) {
             String mn = md.name().toLowerCase(java.util.Locale.ROOT);
+            boolean isCtor = md.name().equals(cls.name());
             // ctor has no return type; skip so `new Foo()` typing stays via New
-            if (!md.name().equals(cls.name())) {
+            if (!isCtor) {
                 m.putIfAbsent(mn, md.returnType());
             }
-            // params keyed by position so a call site can recover the declared param type
+            // params keyed by position so a call site can recover the declared param type;
+            // a constructor's go under `(new)#i` so `new Foo(args)` can coerce a Decimal arg.
             for (int i = 0; i < md.params().size(); i++) {
                 m.putIfAbsent("(" + mn + ")#" + i, md.params().get(i).type());
+                if (isCtor) {
+                    m.putIfAbsent(ctorParamKey(i), md.params().get(i).type());
+                }
             }
         }
         for (ClassDecl inner : cls.inners()) populateMemberTypes(inner, into);
@@ -424,7 +454,9 @@ final class Transpiler {
             sb.append(member);
             if (f.isStatic()) sb.append("static ");
             sb.append(mapType(f.type())).append(' ').append(f.name());
-            if (f.init() != null) sb.append(" = ").append(emitExpr(f.init()));
+            // Apex widens an Integer initializer to a Decimal field (private Decimal total = 0);
+            // Java needs it explicit, so coerce through the same path the locals/params use.
+            if (f.init() != null) sb.append(" = ").append(coerceDecimal(f.type(), f.init()));
             sb.append(";\n");
         }
 
@@ -717,8 +749,7 @@ final class Transpiler {
             case Unary u -> "(" + u.op() + emitExpr(u.operand()) + ")";
             case Postfix p -> emitExpr(p.operand()) + p.op();
             case Binary b -> emitBinary(b);
-            case Ternary t -> "(" + emitExpr(t.cond()) + " ? " + emitExpr(t.then())
-                + " : " + emitExpr(t.els()) + ")";
+            case Ternary t -> emitTernary(t);
             case Call c -> mapCallee(c.callee()) + "(" + emitCallArgs(c.callee(), c.args()) + ")";
             case New nw -> emitNew(nw);
             case ArrayNew a -> "new " + mapType("List<" + a.elementType() + ">")
@@ -743,7 +774,19 @@ final class Transpiler {
         };
     }
 
+    // Apex numeric-narrowing casts on a Decimal -> the runtime Decimal (a BigDecimal) can't be
+    // Java-cast to a primitive box, so route to the right extraction method. Only when the source
+    // expr actually types as Decimal; otherwise the regular cast path applies (no behavior change).
+    private static final java.util.Map<String, String> DECIMAL_NARROW = java.util.Map.of(
+        "Integer", "intValue", "Long", "longValue", "Double", "doubleValue");
+
     private String emitCast(Cast c) {
+        // (Integer) someDecimal / (Long) / (Double): emit dec.intValue()/longValue()/doubleValue()
+        // instead of an illegal Java cast of a BigDecimal to a primitive box.
+        String narrow = DECIMAL_NARROW.get(mapType(c.type()));
+        if (narrow != null && isDecimal(c.expr())) {
+            return "(" + emitExpr(c.expr()) + ")." + narrow + "()";
+        }
         // (List<Account>) queryResult: the query builder returns List<SObject>; re-type and
         // wrap its rows into a real List<Account> (fixes both javac's invariance and the
         // runtime element type, exactly like a direct SOQL bound to List<Account>)
@@ -947,15 +990,53 @@ final class Transpiler {
     // expected type is Decimal and the value is an Integer, wrap it so the assignment/return
     // type-checks. Everywhere else the value is emitted unchanged (no behavior change).
     private String coerceDecimal(String expectedApexType, Expr value) {
+        // a ternary in a Decimal context (Decimal d = c ? 0 : 1): widen PER BRANCH rather than
+        // wrap the whole conditional in Decimal.valueOf(Object) — keeps each branch statically
+        // typed. emitTernary already widens a mixed Decimal/Integer ternary on its own; this adds
+        // the all-Integer case, which only needs widening because the surrounding type is Decimal.
+        if (value instanceof Ternary t && isDecimalType(expectedApexType)) {
+            return "(" + emitExpr(t.cond())
+                + " ? " + coerceDecimal(expectedApexType, t.then())
+                + " : " + coerceDecimal(expectedApexType, t.els()) + ")";
+        }
         if (typer.needsDecimalWiden(expectedApexType, value)) {
             return "Decimal.valueOf(" + emitExpr(value) + ")";
         }
         return emitExpr(value);
     }
 
+    private boolean isDecimalType(String apexType) {
+        return apexType != null && base(apexType).equalsIgnoreCase("Decimal");
+    }
+
     private boolean isIntegerExpr(Expr e) {
         return typer.isInteger(e);
     }
+
+    // Apex `cond ? a : b` -> Java conditional. When one branch is a Decimal and the other an
+    // Integer, widen the Integer branch (Decimal.valueOf) so the Java conditional has a single
+    // type (Java unifies the branches to a common type; Decimal vs int wouldn't, and the result
+    // type would be lost). Per-branch widening keeps static typing, unlike wrapping the whole
+    // conditional in Decimal.valueOf(Object).
+    private String emitTernary(Ternary t) {
+        Expr then = t.then();
+        Expr els = t.els();
+        String thenJava;
+        String elsJava;
+        if (isDecimal(then) && isIntegerExpr(els)) {
+            thenJava = emitExpr(then);
+            elsJava = "Decimal.valueOf(" + emitExpr(els) + ")";
+        } else if (isDecimal(els) && isIntegerExpr(then)) {
+            thenJava = "Decimal.valueOf(" + emitExpr(then) + ")";
+            elsJava = emitExpr(els);
+        } else {
+            thenJava = emitExpr(then);
+            elsJava = emitExpr(els);
+        }
+        return "(" + emitExpr(t.cond()) + " ? " + thenJava + " : " + elsJava + ")";
+    }
+
+    private static final Set<String> RELATIONAL = Set.of("<", ">", "<=", ">=");
 
     private String emitBinary(Binary b) {
         // Apex Decimal arithmetic -> method calls (BigDecimal has no +/-/*// operators).
@@ -972,6 +1053,13 @@ final class Transpiler {
                 // documented DEFAULT_ROUNDING); scale stays 8.
                 default -> left + ".divide(" + right + ", 8, java.math.RoundingMode.HALF_EVEN)";
             };
+        }
+        // Apex Decimal ordering -> compareTo (Java has no </>/<=/>= operator for the Decimal
+        // class). The non-Decimal Integer side widens via Decimal.valueOf. ==/!= are left alone:
+        // those are object identity/equals semantics handled below, out of scope here.
+        if (RELATIONAL.contains(b.op()) && (isDecimal(b.left()) || isDecimal(b.right()))) {
+            return "(" + decimalOperand(b.left()) + ".compareTo("
+                + decimalOperand(b.right()) + ") " + b.op() + " 0)";
         }
         String l = emitExpr(b.left());
         String r = emitExpr(b.right());
@@ -1008,7 +1096,33 @@ final class Transpiler {
             String args = emitArgs(nw.args());
             return "new SObject(\"" + base(nw.type()) + "\"" + (args.isEmpty() ? "" : ", " + args) + ")";
         }
-        return "new " + mapType(nw.type()) + "(" + emitArgs(nw.args()) + ")";
+        // a user class's constructor: coerce an Integer argument into a Decimal ctor param
+        // (Apex widens; Java needs it explicit). Ctor param types are indexed under `(new)#i`.
+        return "new " + mapType(nw.type()) + "(" + emitCtorArgs(base(nw.type()), nw.args()) + ")";
+    }
+
+    // emitArgs, coercing each Integer arg into the declared type of constructor param #i of
+    // `klass` (via the `(new)#i` index). An unknown class/ctor finds nothing and emits each arg
+    // unchanged — no behavior change.
+    private String emitCtorArgs(String klass, List<Expr> args) {
+        List<String> out = new ArrayList<>();
+        for (int i = 0; i < args.size(); i++) {
+            out.add(coerceDecimal(ctorParamTypeOf(klass, i), args.get(i)));
+        }
+        return String.join(", ", out);
+    }
+
+    // The declared Apex type of constructor param #index of a known user class (via the `(new)#i`
+    // index), or null. Mirrors paramTypeOf for the constructor key.
+    private String ctorParamTypeOf(String klass, int index) {
+        if (klass == null) {
+            return null;
+        }
+        java.util.Map<String, String> m = memberTypes.get(base(klass));
+        if (m == null && base(klass).contains(".")) {
+            m = memberTypes.get(base(klass).substring(base(klass).lastIndexOf('.') + 1));
+        }
+        return m == null ? null : m.get(ctorParamKey(index));
     }
 
     private String emitArgs(List<Expr> args) {

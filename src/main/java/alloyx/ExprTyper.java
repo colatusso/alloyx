@@ -118,7 +118,10 @@ final class ExprTyper {
                 return en.getValue();
             }
         }
-        return null;
+        // an INHERITED field read without `this.`: the current body's own fields live in
+        // locals, a superclass's don't — resolve through the member index's extends walk.
+        // Locals shadow this on purpose (checked above), matching Apex scoping.
+        return memberType(currentClassOf(), n.ident());
     }
 
     private String typeOfProp(Prop p) {
@@ -247,16 +250,45 @@ final class ExprTyper {
 
     private static final Set<String> COLLECTION = Set.of("List", "Set", "Map");
 
-    // look up a member's declared Apex type on a known user class (case-insensitive member)
-    private String memberType(String klass, String member) {
+    // Look up a member's declared Apex type on a known user class (case-insensitive member),
+    // following the `extends` chain when the member isn't declared on the class itself: a param
+    // q:EventQueue extends EventRecord reading q.config (config declared on EventRecord) resolves.
+    // Heritage is stored by Transpiler.populateMemberTypes under the reserved EXTENDS_KEY (the
+    // superclass simple name). The `seen` set guards against an inheritance cycle in malformed
+    // input (A extends B extends A) so the walk always terminates. Package-private so the
+    // Transpiler's emission paths share this ONE walk (DRY) instead of mirroring it.
+    String memberType(String klass, String member) {
+        return memberType(klass, member, new java.util.HashSet<>());
+    }
+
+    private String memberType(String klass, String member, Set<String> seen) {
+        Map<String, String> m = entryFor(klass);
+        if (m == null || !seen.add(simpleName(klass))) {
+            return null; // unknown class, or a cycle already visited -> stop (no infinite loop)
+        }
+        String own = m.get(member.toLowerCase(Locale.ROOT));
+        if (own != null) {
+            return own;
+        }
+        String sup = m.get(Transpiler.EXTENDS_KEY);
+        return sup == null ? null : memberType(sup, member, seen);
+    }
+
+    // The member-type entry for a class, by simple name (Outer.Inner -> Inner), or null.
+    private Map<String, String> entryFor(String klass) {
         if (klass == null) {
             return null;
         }
         Map<String, String> m = memberTypes.get(klass);
         if (m == null && klass.contains(".")) {
-            m = memberTypes.get(klass.substring(klass.lastIndexOf('.') + 1)); // Outer.Inner -> Inner
+            m = memberTypes.get(simpleName(klass)); // Outer.Inner -> Inner
         }
-        return m == null ? null : m.get(member.toLowerCase(Locale.ROOT));
+        return m;
+    }
+
+    private static String simpleName(String klass) {
+        return klass != null && klass.contains(".")
+            ? klass.substring(klass.lastIndexOf('.') + 1) : klass;
     }
 
     private String currentClassOf() {
