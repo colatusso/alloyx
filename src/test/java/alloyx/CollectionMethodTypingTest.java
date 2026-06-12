@@ -235,6 +235,26 @@ class CollectionMethodTypingTest {
     }
 
     @Test
+    void mapFromList_keysById_compilesAndRuns() throws Exception {
+        // new Map<Id, Inv__c>(records) — the Id-keying list constructor. The list is built from
+        // typed records; the constructor keys each by its Id and the typed getter reads back off
+        // the Map value. Proves the SObject-bound constructor binds and runs end-to-end.
+        Path p = probe("ById", """
+            public class ById {
+                public static Decimal go() {
+                    List<Inv__c> records = new List<Inv__c>();
+                    records.add(new Inv__c(Id = 'a01', Total__c = 7));
+                    records.add(new Inv__c(Id = 'a02', Total__c = 11));
+                    Map<Id, Inv__c> byId = new Map<Id, Inv__c>(records);
+                    return byId.get('a02').Total__c;
+                }
+            }
+            """);
+        Object v = Workspace.compile(List.of(p)).load("ById").getMethod("go").invoke(null);
+        assertEquals(0, ((alloyx.runtime.Decimal) v).compareTo(alloyx.runtime.Decimal.valueOf("11")));
+    }
+
+    @Test
     void forEachOverValues_compilesAndRuns() throws Exception {
         // for (Inv__c x : m.values()) { x.Total__c } — values() is a List<Inv__c> view; the loop
         // body reads the typed getter. Sums the totals to prove the iteration ran end-to-end.

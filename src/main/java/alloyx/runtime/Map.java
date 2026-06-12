@@ -14,11 +14,9 @@ public class Map<K, V> extends java.util.HashMap<K, V> {
 
     /** Apex: new Map<Id, SObject>(records) — keyed by each record's Id field. */
     @SuppressWarnings("unchecked")
-    public Map(java.util.Collection<? extends V> records) {
-        for (V r : records) {
-            if (r instanceof SObject so) {
-                put((K) so.get("Id"), r);
-            }
+    public Map(java.util.Collection<? extends SObject> records) {
+        for (SObject so : records) {
+            put((K) so.get("Id"), (V) so);
         }
     }
 
