@@ -55,6 +55,11 @@ final class Transpiler {
         "import alloyx.runtime.EncodingUtil;",
         "import alloyx.runtime.Trigger;",
         "import alloyx.runtime.Test;",
+        "import alloyx.runtime.ApexPages;",
+        "import alloyx.runtime.PageReference;",
+        "import alloyx.runtime.AggregateResult;",
+        "import alloyx.runtime.ConnectApi;",
+        "import alloyx.runtime.Schema;",
         "import alloyx.runtime.dom.Document;",
         "import alloyx.runtime.dom.XmlNode;",
         "import alloyx.runtime.dom.XmlNodeType;");
@@ -66,10 +71,13 @@ final class Transpiler {
     private static final Set<String> SCHEMA_TYPES = Set.of("SObjectType", "DescribeSObjectResult");
     // native Apex System types backed by runtime classes (not dynamic sObjects)
     private static final Set<String> RUNTIME_TYPES = Set.of("Pattern", "Matcher", "LoggingLevel", "Limits",
-        "Http", "HttpRequest", "HttpResponse", "Blob", "EncodingUtil", "Trigger", "Test");
+        "Http", "HttpRequest", "HttpResponse", "Blob", "EncodingUtil", "Trigger", "Test",
+        "ApexPages", "PageReference", "AggregateResult");
     // Database namespace result types: nested classes on the runtime Database, kept qualified
     private static final Set<String> DATABASE_TYPES =
         Set.of("SaveResult", "UpsertResult", "DeleteResult", "Error");
+    // ApexPages namespace nested types: nested classes/enum on the runtime ApexPages, kept qualified
+    private static final Set<String> APEXPAGES_TYPES = Set.of("Severity", "Message");
     // Apex is case-insensitive, so HTTPRequest == HttpRequest and blob == Blob; map a lowercased
     // native type name back to its canonical runtime class.
     private static final java.util.Map<String, String> RUNTIME_CANON = lowerIndex(RUNTIME_TYPES);
@@ -444,6 +452,10 @@ final class Transpiler {
         String prevClass = typer.currentClass;
         typer.currentClass = cls.name(); // `this`-rooted member typing resolves against this body
 
+        // Apex `abstract class` maps straight to a Java abstract class (so it can hold
+        // bodyless abstract methods and can't be instantiated). `virtual` has no Java
+        // analogue and is dropped — every Java method is overridable already.
+        if (!iface && cls.isAbstract()) sb.append("abstract ");
         sb.append(iface ? "interface " : "class ").append(cls.name());
         sb.append(emitTypeRelations(cls, iface));
         sb.append(" {\n");
@@ -508,7 +520,11 @@ final class Transpiler {
             locals.putAll(fieldTypes);
             for (Param p : m.params()) locals.put(p.name(), p.type());
             currentReturnType = isCtor ? "void" : m.returnType();
+            // an Apex `abstract` method in a class is bodyless: emit `abstract <ret> name(args);`
+            // (Java requires no body and rejects an empty `{ }` for a non-void return).
+            boolean isAbstractMethod = m.isAbstract() && !isCtor;
             sb.append(member).append("public ");
+            if (isAbstractMethod) sb.append("abstract ");
             if (m.isStatic()) sb.append("static ");
             if (!isCtor) sb.append(mapType(m.returnType())).append(' ');
             sb.append(m.name()).append('(');
@@ -516,6 +532,10 @@ final class Transpiler {
                 if (i > 0) sb.append(", ");
                 Param p = m.params().get(i);
                 sb.append(mapType(p.type())).append(' ').append(p.name());
+            }
+            if (isAbstractMethod) {
+                sb.append(");\n");
+                continue;
             }
             sb.append(") {\n");
             for (Stmt s : m.body()) emitStmt(s, stmt, sb);
@@ -814,11 +834,60 @@ final class Transpiler {
                 return runtimeEnum + "." + p.name().toUpperCase(java.util.Locale.ROOT);
             }
         }
+        // ApexPages.Severity.<member>: nested native enum, case-insensitive like the rest
+        if (p.target() instanceof Prop tp && tp.target() instanceof Name tpn
+                && tpn.ident().equalsIgnoreCase("ApexPages") && tp.name().equalsIgnoreCase("Severity")) {
+            return "ApexPages.Severity." + p.name().toUpperCase(java.util.Locale.ROOT);
+        }
+        // Schema.SObjectType.<Name>... static describe chain — org-coupled, degrade to Object
+        if (namespaceRoot(p, "Schema") && startsWithMember(p, "SObjectType")) {
+            return "Schema.describeToken(\"" + escape(dottedTail(p, 2)) + "\")";
+        }
+        // any ConnectApi.* access (a nested type/static field) degrades to Object
+        if (namespaceRoot(p, "ConnectApi")) {
+            return "ConnectApi.unsupported(\"" + escape(dottedTail(p, 1)) + "\")";
+        }
         String access = fieldAccess(p);
         if (p.safe()) { // Apex a?.b -> (a == null ? null : a.b)
             return "(" + emitExpr(p.target()) + " == null ? null : " + access + ")";
         }
         return access;
+    }
+
+    // The leftmost identifier of a Prop/MethodCall chain (a.b.c -> "a"), or null if it
+    // doesn't bottom out at a bare Name. Lets a whole namespace chain be recognized by root.
+    private static String chainRoot(Expr e) {
+        while (true) {
+            if (e instanceof Prop p) e = p.target();
+            else if (e instanceof MethodCall mc) e = mc.target();
+            else break;
+        }
+        return e instanceof Name n ? n.ident() : null;
+    }
+
+    /** True when a Prop chain is rooted at the named namespace (e.g. ConnectApi.X.y). */
+    private static boolean namespaceRoot(Prop p, String namespace) {
+        return namespace.equalsIgnoreCase(chainRoot(p));
+    }
+
+    /** True when the immediate child of the namespace root is the given member (Schema.SObjectType...). */
+    private static boolean startsWithMember(Prop p, String member) {
+        Expr e = p;
+        while (e instanceof Prop pp && pp.target() instanceof Prop) e = ((Prop) e).target();
+        return e instanceof Prop pr && pr.name().equalsIgnoreCase(member);
+    }
+
+    // The dotted path of a Prop chain past `dropLeading` leading segments, for a diagnostic
+    // string (ConnectApi.ChatterFeeds.X -> "ChatterFeeds.X" with dropLeading=1).
+    private static String dottedTail(Expr e, int dropLeading) {
+        java.util.ArrayDeque<String> parts = new java.util.ArrayDeque<>();
+        while (e instanceof Prop p) {
+            parts.addFirst(p.name());
+            e = p.target();
+        }
+        if (e instanceof Name n) parts.addFirst(n.ident());
+        List<String> all = new ArrayList<>(parts);
+        return String.join(".", all.subList(Math.min(dropLeading, all.size()), all.size()));
     }
 
     private String fieldAccess(Prop p) {
@@ -895,6 +964,18 @@ final class Transpiler {
 
     private String methodCall(MethodCall mc) {
         String name = mc.name();
+        // a call whose target is a NESTED ConnectApi/Schema chain (not the bare namespace) is
+        // org-coupled and unmodeled: degrade to the runtime placeholder. A call directly on the
+        // bare `ConnectApi`/`Schema` name (Schema.getGlobalDescribe()) is a real static and
+        // falls through to the normal emission below (the runtime class provides it).
+        if (mc.target() instanceof Prop tp) {
+            if (namespaceRoot(tp, "ConnectApi")) {
+                return "ConnectApi.unsupported(\"" + escape(dottedTail(tp, 1) + "." + name) + "\")";
+            }
+            if (namespaceRoot(tp, "Schema") && startsWithMember(tp, "SObjectType")) {
+                return "Schema.describeToken(\"" + escape(dottedTail(tp, 2) + "." + name) + "\")";
+            }
+        }
         // built-in static call (Apex is case-insensitive): canonicalize the type name
         // and lower-case the method's first char so Date.ValueOf -> Date.valueOf, etc.
         if (mc.target() instanceof Name n) {
@@ -1220,6 +1301,12 @@ final class Transpiler {
         String base = (lt >= 0 ? t.substring(0, lt) : t).replace("[]", "");
         String canon = BUILTINS.get(base.toLowerCase());
         if (canon != null) base = canon; // case-fold built-in type names (decimal -> Decimal)
+        // ConnectApi is enormous and fully org-coupled: any ConnectApi.* type degrades to Object
+        // for type-checking (see runtime ConnectApi for the rationale).
+        if (base.equals("ConnectApi") || base.startsWith("ConnectApi.")) return "Object";
+        // ApexPages nested types (Severity/Message) stay qualified onto the runtime ApexPages.
+        if (base.startsWith("ApexPages.") && APEXPAGES_TYPES.contains(base.substring("ApexPages.".length())))
+            return base;
         if (base.startsWith("Schema.")) base = base.substring("Schema.".length());
         if (base.startsWith("System.")) base = base.substring("System.".length()); // System.Http -> Http
         if (base.regionMatches(true, 0, "dom.", 0, 4)) return base.substring(4); // Dom.XmlNode -> XmlNode

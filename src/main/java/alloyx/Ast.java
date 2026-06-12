@@ -11,10 +11,17 @@ import java.util.List;
 // --- declarations
 // A type declaration. `kind` is "class", "interface" or "enum". `inners` are nested
 // types; `interfaces` the implemented/extended interface names; `enumValues` the
-// constants (only for an enum). Defaults keep plain-class construction unchanged.
+// constants (only for an enum); `isAbstract` carries the Apex `abstract` modifier so
+// the class emits `abstract` in Java (and may hold bodyless abstract methods).
+// Defaults keep plain-class construction unchanged.
 record ClassDecl(String name, List<MethodDecl> methods, List<Field> fields,
                  String superclass, List<ClassDecl> inners, List<String> interfaces,
-                 String kind, List<String> enumValues) {
+                 String kind, List<String> enumValues, boolean isAbstract) {
+    ClassDecl(String name, List<MethodDecl> methods, List<Field> fields, String superclass,
+              List<ClassDecl> inners, List<String> interfaces, String kind, List<String> enumValues) {
+        this(name, methods, fields, superclass, inners, interfaces, kind, enumValues, false);
+    }
+
     ClassDecl(String name, List<MethodDecl> methods, List<Field> fields, String superclass) {
         this(name, methods, fields, superclass, List.of(), List.of(), "class", List.of());
     }
@@ -30,7 +37,14 @@ record Field(String type, String name, Expr init, boolean isStatic) {}
 record Param(String type, String name) {}
 
 record MethodDecl(String name, boolean isStatic, String returnType,
-                  List<Param> params, List<Stmt> body, List<String> annotations, int line) {
+                  List<Param> params, List<Stmt> body, List<String> annotations, int line,
+                  boolean isAbstract) {
+    // Retrocompat: callers predating the abstract modifier build a concrete method.
+    MethodDecl(String name, boolean isStatic, String returnType,
+               List<Param> params, List<Stmt> body, List<String> annotations, int line) {
+        this(name, isStatic, returnType, params, body, annotations, line, false);
+    }
+
     boolean isTest() {
         return annotations.contains("istest");
     }

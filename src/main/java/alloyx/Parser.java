@@ -158,8 +158,10 @@ final class Parser {
     // --- class / interface / enum
     private ClassDecl parseClass() {
         parseAnnotations();
+        boolean isAbstract = false;
         while (isIdent() && !at("class") && !at("interface") && !at("enum")) {
-            advance(); // skip modifiers
+            if (peek().value().equalsIgnoreCase("abstract")) isAbstract = true;
+            advance(); // skip modifiers (capturing `abstract` as we go)
         }
         String kind = at("interface") ? "interface" : at("enum") ? "enum" : "class";
         advance(); // consume the class | interface | enum keyword
@@ -177,7 +179,7 @@ final class Parser {
             interfaces.add(base(consumeType()));
             while (accept(",")) interfaces.add(base(consumeType()));
         }
-        return parseClassBody(name, superclass, interfaces, kind);
+        return parseClassBody(name, superclass, interfaces, kind, isAbstract);
     }
 
     // An Apex enum is a flat list of constant names: enum E { A, B, C }
@@ -197,6 +199,11 @@ final class Parser {
     // type and inner types (which arrive here past their `class Name extends ...`).
     private ClassDecl parseClassBody(String name, String superclass,
                                      List<String> interfaces, String kind) {
+        return parseClassBody(name, superclass, interfaces, kind, false);
+    }
+
+    private ClassDecl parseClassBody(String name, String superclass,
+                                     List<String> interfaces, String kind, boolean isAbstract) {
         expect("{");
         List<MethodDecl> methods = new ArrayList<>();
         List<Field> fields = new ArrayList<>();
@@ -211,7 +218,8 @@ final class Parser {
             } else methods.add((MethodDecl) member);
         }
         expect("}");
-        return new ClassDecl(name, methods, fields, superclass, inners, interfaces, kind, List.of());
+        return new ClassDecl(name, methods, fields, superclass, inners, interfaces, kind,
+            List.of(), isAbstract);
     }
 
     // strip any generic suffix: List<String> -> List
@@ -250,6 +258,7 @@ final class Parser {
         }
         String name = parts.get(parts.size() - 1);
         boolean isStatic = kwIndex(parts.subList(0, parts.size() - 1), "static") >= 0;
+        boolean isAbstract = kwIndex(parts.subList(0, parts.size() - 1), "abstract") >= 0;
         String returnType = parts.size() >= 2 ? parts.get(parts.size() - 2) : "void";
 
         if (at("(")) { // method or constructor
@@ -267,7 +276,8 @@ final class Parser {
                 expect(";"); // abstract / interface signature
                 body = new ArrayList<>();
             }
-            return new MethodDecl(name, isStatic, returnType, params, body, anns, lineNum(memberStart));
+            return new MethodDecl(name, isStatic, returnType, params, body, anns,
+                lineNum(memberStart), isAbstract);
         }
         if (at("{")) {
             // a nested type is parsed (not discarded): the cursor is at its body's '{', and
@@ -294,7 +304,8 @@ final class Parser {
                         innerInterfaces.add(base(parts.get(k)));
                     }
                 }
-                return parseClassBody(innerName, sup, innerInterfaces, kw);
+                boolean innerAbstract = kwIndex(parts, "abstract") >= 0;
+                return parseClassBody(innerName, sup, innerInterfaces, kw, innerAbstract);
             }
             // property (Type name { get; set; }) or a static{} initializer block
             skipBalancedBraces();
