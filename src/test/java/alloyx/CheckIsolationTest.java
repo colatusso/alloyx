@@ -128,6 +128,30 @@ class CheckIsolationTest {
             "check must write no .java/.class into the project cache (it owns only schema/)");
     }
 
+    /**
+     * When javac fails on ANOTHER unit (a broken dep) and nothing lands on the target, the
+     * target was never type-checked — reporting [] would be a FALSE CLEAN (batch validation
+     * found hundreds: the duplicate-class abort family). One synthetic diagnostic must surface.
+     */
+    @Test
+    void brokenDepCannotProduceAFalseClean() throws Exception {
+        write("Dep", """
+            public class Dep {
+                public static Integer broken() { return 'not an integer'; }
+            }
+            """);
+        Path b = write("B", """
+            public class B {
+                public Integer go() { return Dep.broken(); }
+            }
+            """);
+        List<Workspace.Diag> diags = Workspace.check(b, null, cache());
+        assertEquals(1, diags.size(), "expected the synthetic workspace diagnostic, got: " + diags);
+        org.junit.jupiter.api.Assertions.assertTrue(
+            diags.get(0).message().startsWith("workspace did not compile"),
+            "must say the workspace failed, got: " + diags.get(0).message());
+    }
+
     // Every .java/.class anywhere under the cache dir EXCEPT the schema/ subtree (which the cache
     // legitimately owns). Non-empty => a check leaked compile output that a later one could read.
     private List<String> compileArtifactsIn(Path cacheDir) throws Exception {

@@ -501,7 +501,7 @@ final class Workspace {
         var fm = compiler.getStandardFileManager(collected, null, java.nio.charset.StandardCharsets.UTF_8);
         String classpath = java.lang.System.getProperty("java.class.path");
         List<String> options = List.of("-cp", classpath, "-d", outDir.toString());
-        compiler.getTask(null, fm, collected, options, null,
+        boolean compiled = compiler.getTask(null, fm, collected, options, null,
             fm.getJavaFileObjectsFromStrings(javaFiles)).call();
         fm.close();
 
@@ -520,6 +520,18 @@ final class Workspace {
             int apexLine = mapLine(map, (int) d.getLineNumber());
             out.add(new Diag(d.getKind().toString(), apexLine, (int) d.getColumnNumber(),
                 apexify(msg)));
+        }
+        // javac failed but every error sat on ANOTHER unit (a dep or a generated class), so the
+        // target was never fully type-checked. Returning [] here would be a FALSE CLEAN — batch
+        // validation proved hundreds of those. Surface one synthetic diagnostic instead.
+        if (!compiled && out.isEmpty()) {
+            String why = collected.getDiagnostics().stream()
+                .filter(d -> d.getKind() == javax.tools.Diagnostic.Kind.ERROR)
+                .findFirst()
+                .map(d -> (d.getSource() != null ? Path.of(d.getSource().getName()).getFileName() + ": " : "")
+                    + apexify(d.getMessage(null)))
+                .orElse("no diagnostic reported");
+            out.add(new Diag("ERROR", 1, 1, "workspace did not compile: " + why));
         }
         return out;
     }
