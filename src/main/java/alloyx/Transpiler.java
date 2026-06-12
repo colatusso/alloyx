@@ -184,6 +184,11 @@ final class Transpiler {
     // inner (nested) class names — both simple (Inner) and qualified (Outer.Inner) —
     // so references resolve as a user type, never the fallback dynamic SObject
     private final Set<String> innerTypes = new java.util.HashSet<>();
+    // the top-level class being emitted: the qualifier for its inner types. Lets a field/local whose
+    // declared type names an inner be QUALIFIED (Outer.Inner) in the locals/fieldTypes view, mirroring
+    // the member-type index, so `this.event`/a local typed by an inner that collides with a global
+    // sObject name resolves to the inner — not the sObject. Set in emitClass (one top-level class).
+    private String outerName;
     // source map inputs/outputs: stmt->Apex line (from the parser) and the
     // generated-Java line -> Apex line accumulated while emitting
     private java.util.Map<Stmt, Integer> stmtLines = java.util.Map.of();
@@ -381,6 +386,7 @@ final class Transpiler {
     }
 
     private Result emitClass(ClassDecl cls) {
+        this.outerName = cls.name();
         registerInnerTypes(cls);
         indexMemberTypes(cls);
         StringBuilder sb = new StringBuilder();
@@ -419,6 +425,24 @@ final class Transpiler {
             innerTypes.add(inner.name());
             innerTypes.add(cls.name() + "." + inner.name());
         }
+    }
+
+    // Qualify a declared field/local/param type whose simple base names one of the CURRENT top-level
+    // class's inner types (Outer.Inner) so the locals/fieldTypes view matches the member-type index.
+    // Without this, `this.event` / a local typed by an inner colliding with a global sObject name (a
+    // bare `Event`) would resolve via locals to the std sObject, routing the next hop dynamically.
+    // Mirrors populateMemberTypes.qualifyOwnInner, applied to the emission-time type views; the same
+    // per-class precedence — a class with no such inner keeps the bare name (-> the std sObject).
+    private String qualifyInnerType(String rawType) {
+        if (rawType == null || outerName == null) {
+            return rawType;
+        }
+        String b = base(rawType);
+        if (b == null || b.contains(".") || !innerTypes.contains(b)) {
+            return rawType;
+        }
+        int lt = rawType.indexOf('<');
+        return lt < 0 ? outerName + "." + b : outerName + "." + b + rawType.substring(lt);
     }
 
     // Seed this Transpiler's member-type index with the class being emitted (+ its inners) on top
@@ -471,15 +495,30 @@ final class Transpiler {
     // the compile set (cross-class typing).
     static void populateMemberTypes(ClassDecl cls,
             java.util.Map<String, java.util.Map<String, String>> into) {
-        populateMemberTypes(cls, into, null);
+        // The file-scope inner names of THIS top-level class — used to qualify a member type that
+        // names one of them (see qualifyOwnInner). Apex nests only one level, so the outer's inners
+        // are the full set visible to the outer and to every sibling inner.
+        java.util.Set<String> innerNames = new java.util.HashSet<>();
+        for (ClassDecl inner : cls.inners()) {
+            innerNames.add(inner.name());
+        }
+        populateMemberTypes(cls, into, null, cls.name(), innerNames);
     }
 
     // `qualified`, when non-null, is the Outer.Inner name an inner class is ALSO indexed under (a
     // collision-free key), in addition to its simple name. The qualified entry is authoritative for
     // that inner; the simple entry is a retrocompat alias for unqualified references and is POISONED
     // if a second, different outer contributes an inner with the same simple name (see AMBIGUOUS).
+    //
+    // `outer`/`innerNames` carry the file-scope owner: when a recorded member type names an inner of
+    // THIS outer (e.g. a field `Event event` where Event is `outer`.Event), it is stored QUALIFIED
+    // (`outer.Event`) so consumers never face the ambiguity of the bare name colliding with a global
+    // sObject. Apex scoping: inside a class, its own inner type names shadow global/sObject names for
+    // member DECLARATIONS — this mirrors that precedence, applied per-owner (a DIFFERENT class with a
+    // bare `Event` field, having no such inner, still records the bare name -> the std sObject).
     private static void populateMemberTypes(ClassDecl cls,
-            java.util.Map<String, java.util.Map<String, String>> into, String qualified) {
+            java.util.Map<String, java.util.Map<String, String>> into, String qualified,
+            String outer, java.util.Set<String> innerNames) {
         // Build the class's own members into a fresh map first, then publish it under its key(s).
         // (For an outer/top-level class this map IS its entry; for an inner it's the authoritative
         // qualified entry AND the source the simple alias mirrors when uncontested.)
@@ -495,22 +534,23 @@ final class Transpiler {
             m.putIfAbsent(EXTENDS_KEY, sup);
         }
         for (Field f : cls.fields()) {
-            m.putIfAbsent(f.name().toLowerCase(java.util.Locale.ROOT), f.type());
+            m.putIfAbsent(f.name().toLowerCase(java.util.Locale.ROOT), qualifyOwnInner(f.type(), outer, innerNames));
         }
         for (MethodDecl md : cls.methods()) {
             String mn = md.name().toLowerCase(java.util.Locale.ROOT);
             boolean isCtor = md.name().equals(cls.name());
             // ctor has no return type; skip so `new Foo()` typing stays via New
             if (!isCtor) {
-                m.putIfAbsent(mn, md.returnType());
+                m.putIfAbsent(mn, qualifyOwnInner(md.returnType(), outer, innerNames));
             }
             // params keyed by position so a call site can recover the declared param type;
             // a constructor's go under `(new)#i` so `new Foo(args)` can coerce a Decimal arg.
             // markParam (not putIfAbsent) so overloads disagreeing at a position poison the key.
             for (int i = 0; i < md.params().size(); i++) {
-                markParam(m, "(" + mn + ")#" + i, md.params().get(i).type());
+                String pt = qualifyOwnInner(md.params().get(i).type(), outer, innerNames);
+                markParam(m, "(" + mn + ")#" + i, pt);
                 if (isCtor) {
-                    markParam(m, ctorParamKey(i), md.params().get(i).type());
+                    markParam(m, ctorParamKey(i), pt);
                 }
             }
         }
@@ -520,10 +560,31 @@ final class Transpiler {
         if (qualified != null) {
             aliasInner(into, cls.name(), qualified, m);
         }
-        // inners: indexed under BOTH the collision-free Outer.Inner key and the simple alias.
+        // inners: indexed under BOTH the collision-free Outer.Inner key and the simple alias. The
+        // file-scope owner (outer/innerNames) is threaded unchanged so a sibling inner's member that
+        // names another inner of the SAME outer is qualified the same way the outer's own members are.
         for (ClassDecl inner : cls.inners()) {
-            populateMemberTypes(inner, into, cls.name() + "." + inner.name());
+            populateMemberTypes(inner, into, cls.name() + "." + inner.name(), outer, innerNames);
         }
+    }
+
+    // When `rawType`'s simple base names an inner class OF THE OWNING OUTER (`outer`), return the
+    // QUALIFIED `outer.Base` (preserving any generic suffix), so a member typed by an inner name that
+    // collides with a global/sObject name resolves to the INNER — Apex's per-class shadowing for
+    // member declarations. Already-qualified or non-inner names pass through unchanged. Name-agnostic:
+    // it only consults the actual inner-name set of the class being indexed, never a fixed list.
+    private static String qualifyOwnInner(String rawType, String outer, java.util.Set<String> innerNames) {
+        if (rawType == null || outer == null) {
+            return rawType;
+        }
+        String b = base(rawType);
+        if (b == null || b.contains(".") || !innerNames.contains(b)) {
+            return rawType; // already qualified, or not one of this outer's inners
+        }
+        // preserve a generic suffix (e.g. List<Event> stays a List; only the base is qualified here —
+        // an inner-typed ELEMENT keeps its own ambiguity, out of scope for this member-base fix).
+        int lt = rawType.indexOf('<');
+        return lt < 0 ? outer + "." + b : outer + "." + b + rawType.substring(lt);
     }
 
     // Reserved marker the simple inner-class alias carries to record which qualified inner owns it —
@@ -593,7 +654,9 @@ final class Transpiler {
         boolean iface = cls.kind().equals("interface");
 
         java.util.Map<String, String> myFields = new java.util.LinkedHashMap<>(outerStatics);
-        for (Field f : cls.fields()) myFields.put(f.name(), f.type());
+        // qualify a field typed by an inner of this top-level class (Outer.Inner) so the typer's
+        // this.<field> / locals view agrees with the member-type index — see qualifyInnerType.
+        for (Field f : cls.fields()) myFields.put(f.name(), qualifyInnerType(f.type()));
         this.fieldTypes = myFields;
         String prevClass = typer.currentClass;
         typer.currentClass = cls.name(); // `this`-rooted member typing resolves against this body
@@ -664,7 +727,9 @@ final class Transpiler {
             boolean isCtor = m.name().equals(cls.name());
             locals.clear();
             locals.putAll(fieldTypes);
-            for (Param p : m.params()) locals.put(p.name(), p.type());
+            // qualify a param typed by this class's inner (Outer.Inner) the same as fields, so a
+            // method whose param/locals are inner-typed (colliding with a global sObject) types right.
+            for (Param p : m.params()) locals.put(p.name(), qualifyInnerType(p.type()));
             reassignedLocals.clear();
             collectReassigned(m.body(), reassignedLocals);
             currentReturnType = isCtor ? "void" : m.returnType();
@@ -713,7 +778,7 @@ final class Transpiler {
         }
         switch (s) {
             case VarDecl v -> {
-                locals.put(v.name(), v.type());
+                locals.put(v.name(), qualifyInnerType(v.type()));
                 if (v.init() == null) {
                     // Apex locals default to null; emit it so Java's definite-assignment
                     // rule is satisfied too (everything maps to a boxed/reference type)
@@ -836,7 +901,7 @@ final class Transpiler {
                 sb.append(indent).append("}\n");
             }
             case ForEach fe -> {
-                locals.put(fe.name(), fe.type());
+                locals.put(fe.name(), qualifyInnerType(fe.type()));
                 // for (Account a : [SELECT...]) -> iterate the re-typed query result
                 String iterable = fe.iterable() instanceof Soql && isTyped(base(fe.type()))
                     ? base(fe.type()) + ".many(" + emitExpr(fe.iterable()) + ")"
