@@ -60,6 +60,13 @@ final class Transpiler {
         "import alloyx.runtime.AggregateResult;",
         "import alloyx.runtime.ConnectApi;",
         "import alloyx.runtime.Schema;",
+        "import alloyx.runtime.Schedulable;",
+        "import alloyx.runtime.SchedulableContext;",
+        "import alloyx.runtime.Queueable;",
+        "import alloyx.runtime.QueueableContext;",
+        "import alloyx.runtime.Comparable;",
+        "import alloyx.runtime.Iterable;",
+        "import alloyx.runtime.Iterator;",
         "import alloyx.runtime.dom.Document;",
         "import alloyx.runtime.dom.XmlNode;",
         "import alloyx.runtime.dom.XmlNodeType;");
@@ -69,13 +76,29 @@ final class Transpiler {
     private static final Set<String> COLLECTIONS = Set.of("List", "Set", "Map");
     // Apex Schema namespace types backed by runtime classes (not dynamic sObjects)
     private static final Set<String> SCHEMA_TYPES = Set.of("SObjectType", "DescribeSObjectResult");
-    // native Apex System types backed by runtime classes (not dynamic sObjects)
+    // native Apex System types backed by runtime classes (not dynamic sObjects). The async/
+    // schedulable platform interfaces (Schedulable, Queueable, their contexts) and the sortable/
+    // iterable contracts (Comparable, Iterable, Iterator) live here too: they're real Apex
+    // interfaces backed by runtime interfaces, so `implements Schedulable` maps to a real Java
+    // interface instead of collapsing to the dynamic SObject ("interface expected here").
     private static final Set<String> RUNTIME_TYPES = Set.of("Pattern", "Matcher", "LoggingLevel", "Limits",
         "Http", "HttpRequest", "HttpResponse", "Blob", "EncodingUtil", "Trigger", "Test",
-        "ApexPages", "PageReference", "AggregateResult");
-    // Database namespace result types: nested classes on the runtime Database, kept qualified
+        "ApexPages", "PageReference", "AggregateResult",
+        "Schedulable", "SchedulableContext", "Queueable", "QueueableContext",
+        "Comparable", "Iterable", "Iterator");
+    // Database namespace types: nested classes/interfaces on the runtime Database, kept qualified.
+    // Batchable<T> + its context/locator + the Stateful/AllowsCallouts/RaisesPlatformEvents markers
+    // are real Apex interfaces, so `implements Database.Batchable<sObject>` maps to a real Java
+    // interface (nested on Database) instead of collapsing to the dynamic SObject.
     private static final Set<String> DATABASE_TYPES =
-        Set.of("SaveResult", "UpsertResult", "DeleteResult", "Error");
+        Set.of("SaveResult", "UpsertResult", "DeleteResult", "Error",
+            "Batchable", "BatchableContext", "QueryLocator",
+            "Stateful", "AllowsCallouts", "RaisesPlatformEvents");
+    // Recognized runtime/Database types that carry a generic parameter to PRESERVE (Batchable<T>,
+    // Iterable<T>, Iterator<T>) — their <...> must be mapped through, not stripped like the other
+    // qualified runtime types. Names are simple (Database. prefix already removed when consulted).
+    private static final Set<String> GENERIC_RUNTIME_TYPES =
+        Set.of("Batchable", "Iterable", "Iterator");
     // ApexPages namespace nested types: nested classes/enum on the runtime ApexPages, kept qualified
     private static final Set<String> APEXPAGES_TYPES = Set.of("Severity", "Message");
     // Apex is case-insensitive, so HTTPRequest == HttpRequest and blob == Blob; map a lowercased
@@ -1422,13 +1445,15 @@ final class Transpiler {
         if (base.startsWith("Schema.")) base = base.substring("Schema.".length());
         if (base.startsWith("System.")) base = base.substring("System.".length()); // System.Http -> Http
         if (base.regionMatches(true, 0, "dom.", 0, 4)) return base.substring(4); // Dom.XmlNode -> XmlNode
-        // Database.SaveResult / Database.Error stay qualified (nested classes on runtime Database)
+        // Database.SaveResult / Database.Error stay qualified (nested classes on runtime Database);
+        // Database.Batchable<sObject> keeps its generic so it implements Batchable<T> faithfully.
         if (base.startsWith("Database.") && DATABASE_TYPES.contains(base.substring("Database.".length())))
-            return base;
+            return base + runtimeGenerics(base.substring("Database.".length()), lt, t);
         if (SCHEMA_TYPES.contains(base)) return base; // Schema.SObjectType -> runtime SObjectType
-        // native System types, case-insensitive (Apex): HTTPRequest -> HttpRequest, blob -> Blob
+        // native System types, case-insensitive (Apex): HTTPRequest -> HttpRequest, blob -> Blob.
+        // Iterable<T>/Iterator<T> keep their generic; the other runtime types carry none.
         String runtimeCanon = RUNTIME_CANON.get(base.toLowerCase(java.util.Locale.ROOT));
-        if (runtimeCanon != null) return runtimeCanon;
+        if (runtimeCanon != null) return runtimeCanon + runtimeGenerics(runtimeCanon, lt, t);
         if (JAVA_SAME.contains(base)) return base;
         if (base.equals("Decimal") || base.equals("Date")
             || base.equals("Datetime") || base.equals("Time")) return base; // runtime types
@@ -1459,6 +1484,14 @@ final class Transpiler {
         // collapse onto the runtime base; user-defined ones keep their name above
         if (base.equals("Exception") || base.endsWith("Exception")) return "ApexException";
         return "SObject"; // unknown non-primitive => assume sObject
+    }
+
+    // The mapped <...> suffix for a recognized generic runtime type (Batchable/Iterable/Iterator),
+    // or "" for any other type or when no generic was written. `simple` is the type's simple name
+    // (Database. prefix already stripped); `lt` is the '<' index in the original `t`, or < 0.
+    private String runtimeGenerics(String simple, int lt, String t) {
+        if (lt < 0 || !GENERIC_RUNTIME_TYPES.contains(simple)) return "";
+        return mapGenerics(t.substring(lt));
     }
 
     private String mapGenerics(String generic) {

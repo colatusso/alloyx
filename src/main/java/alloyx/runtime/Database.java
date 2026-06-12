@@ -147,4 +147,68 @@ public final class Database {
             throw Unsupported.notLocal("Database.Error.getFields()");
         }
     }
+
+    // --- Batch Apex interfaces ----------------------------------------------------------------
+    // A batch class declares `implements Database.Batchable<sObject>` plus optional markers
+    // (Stateful/AllowsCallouts/RaisesPlatformEvents). These are real Apex platform interfaces,
+    // so they map to real Java interfaces — otherwise javac sees a class where it expects an
+    // interface ("interface expected here"). The method signatures mirror what the transpiler
+    // EMITS for start/execute/finish: QueryLocator start(BatchableContext), void execute(
+    // BatchableContext, List<T>), void finish(BatchableContext). Batch ORCHESTRATION isn't
+    // modeled locally (chunking, scope iteration), only the type surface so domain code compiles.
+
+    /**
+     * Apex {@code Database.Batchable<T>}: a batch job's start/execute/finish contract. {@code T}
+     * is the scope element type ({@code sObject} for query-locator batches). Implementations
+     * compile and can be unit-tested directly; the framework that drives them isn't local.
+     */
+    public interface Batchable<T> {
+        QueryLocator start(BatchableContext bc);
+
+        void execute(BatchableContext bc, List<T> scope);
+
+        void finish(BatchableContext bc);
+    }
+
+    /** Marker: a batch keeps instance state across execute() chunks (Database.Stateful). */
+    public interface Stateful {
+    }
+
+    /** Marker: a batch may make callouts from execute() (Database.AllowsCallouts). */
+    public interface AllowsCallouts {
+    }
+
+    /** Marker: a batch raises BatchApexErrorEvent platform events (Database.RaisesPlatformEvents). */
+    public interface RaisesPlatformEvents {
+    }
+
+    /**
+     * Handle passed to every batch callback (Database.BatchableContext). The job/child ids are
+     * an org-runtime concern, so reading one fails clearly rather than returning a fake id.
+     */
+    public interface BatchableContext {
+        default String getJobId() {
+            throw Unsupported.notLocal("Database.BatchableContext.getJobId()");
+        }
+
+        default String getChildJobId() {
+            throw Unsupported.notLocal("Database.BatchableContext.getChildJobId()");
+        }
+    }
+
+    /**
+     * Opaque cursor returned by {@code Database.getQueryLocator(...)} and a batch's start()
+     * (Database.QueryLocator). Local has no streaming query cursor, so it carries no rows;
+     * iterating one isn't modeled. It exists so start()'s declared return type resolves.
+     */
+    public interface QueryLocator {
+        default java.util.Iterator<SObject> iterator() {
+            throw Unsupported.notLocal("Database.QueryLocator iteration");
+        }
+    }
+
+    /** Local has no query cursor; getQueryLocator is recognized but fails clearly if invoked. */
+    public static QueryLocator getQueryLocator(String soql) {
+        throw Unsupported.notLocal("Database.getQueryLocator");
+    }
 }

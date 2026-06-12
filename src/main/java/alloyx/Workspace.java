@@ -39,7 +39,10 @@ final class Workspace {
         "List", "Set", "Map", "Integer", "Long", "Double", "Boolean", "String", "Object",
         "Decimal", "Date", "Datetime", "Time", "Id", "Blob", "void", "SObject", "System",
         "Math", "Database", "JSON", "UserInfo", "Strings", "Schema", "Test", "Trigger",
-        "Exception", "Iterable", "Iterator");
+        "Exception", "Iterable", "Iterator",
+        // platform interfaces backed by runtime types (Schedulable/Queueable + their contexts,
+        // Comparable): never describe to an sObject, so don't waste a describe call on them.
+        "Schedulable", "SchedulableContext", "Queueable", "QueueableContext", "Comparable");
 
     record Compiled(ClassLoader loader, List<ClassDecl> classes) {
         Class<?> load(String name) throws ClassNotFoundException {
