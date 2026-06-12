@@ -902,8 +902,11 @@ final class Transpiler {
             }
             case ForEach fe -> {
                 locals.put(fe.name(), qualifyInnerType(fe.type()));
-                // for (Account a : [SELECT...]) -> iterate the re-typed query result
-                String iterable = fe.iterable() instanceof Soql && isTyped(base(fe.type()))
+                // for (Account a : <List<SObject>>) -> iterate the re-typed rows. The source is
+                // either a SOQL result or a child-relationship collection (ord.Items__r), both
+                // List<SObject>; .many() re-types each row to the typed loop var (Java is invariant,
+                // so a bare List<SObject> can't bind a typed-sObject loop var directly).
+                String iterable = isTyped(base(fe.type())) && iterableIsSObjectList(fe.iterable())
                     ? base(fe.type()) + ".many(" + emitExpr(fe.iterable()) + ")"
                     : emitExpr(fe.iterable());
                 sb.append(indent).append("for (").append(mapType(fe.type())).append(' ')
@@ -1193,6 +1196,12 @@ final class Transpiler {
             return emitExpr(p.target()) + "." + canonicalMember(declaredTypeOf(p.target()), p.name());
         }
         if (isTyped(parent)) {
+            // a child-relationship collection (ord.OrderItems__r): NOT a described field, so there's
+            // no typed getter — route to the dynamic runtime accessor, which returns the List<SObject>
+            // a SOQL child subquery stored under the relationship name (typed List<SObject> by the typer).
+            if (schema.fieldType(parent, p.name()) == null && typer.isChildRelationship(parent, p.name())) {
+                return emitExpr(p.target()) + ".getSObjects(\"" + p.name() + "\")";
+            }
             // typed sObject: a.Name -> a.getName() (javac checks the field exists + its type)
             return emitExpr(p.target()) + ".get" + schema.canonicalField(parent, p.name()) + "()";
         }
@@ -1749,6 +1758,18 @@ final class Transpiler {
             }
         }
         return emitExpr(init);
+    }
+
+    // Whether a for-each iterable is a List<SObject> the loop var must be re-typed from (via .many()):
+    // a SOQL result (Database.query -> List<SObject>) or any expression the typer resolves to a
+    // List whose element is the generic SObject (a child-relationship collection, ord.Items__r). A
+    // List already typed to the loop's sObject (List<Account>) needs no wrap and isn't matched here.
+    private boolean iterableIsSObjectList(Expr iterable) {
+        if (iterable instanceof Soql) {
+            return true;
+        }
+        String t = typer.typeOf(iterable);
+        return t != null && base(t).equals("List") && base(firstGeneric(t)).equals("SObject");
     }
 
     // the element type of a generic: List<Account> -> Account, Map<Id,Account> -> Account

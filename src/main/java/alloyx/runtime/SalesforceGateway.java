@@ -309,26 +309,30 @@ public final class SalesforceGateway implements OrgGateway {
         return out;
     }
 
-    /** Append this page's "records" array (typed via {@link #jsonValue}) into {@code out}. */
+    /** Append this page's "records" array (each parsed via {@link #parseRecord}) into {@code out}. */
     static void appendRecords(JsonObject root, List<SObject> out) {
         JsonArray records = root.getAsJsonArray("records");
         if (records == null) {
             return;
         }
         for (JsonElement el : records) {
-            JsonObject rec = el.getAsJsonObject();
-            String type = rec.has("attributes")
-                ? rec.getAsJsonObject("attributes").get("type").getAsString() : "SObject";
-            java.util.List<Object> kv = new ArrayList<>();
-            for (var entry : rec.entrySet()) {
-                if (entry.getKey().equals("attributes")) {
-                    continue;
-                }
-                kv.add(entry.getKey());
-                kv.add(jsonValue(entry.getValue()));
-            }
-            out.add(new SObject(type, kv.toArray()));
+            out.add(parseRecord(el.getAsJsonObject()));
         }
+    }
+
+    /** One JSON record -> an {@link SObject}: its type (from "attributes") plus every field value. */
+    private static SObject parseRecord(JsonObject rec) {
+        String type = rec.has("attributes")
+            ? rec.getAsJsonObject("attributes").get("type").getAsString() : "SObject";
+        java.util.List<Object> kv = new ArrayList<>();
+        for (var entry : rec.entrySet()) {
+            if (entry.getKey().equals("attributes")) {
+                continue;
+            }
+            kv.add(entry.getKey());
+            kv.add(jsonValue(entry.getValue()));
+        }
+        return new SObject(type, kv.toArray());
     }
 
     /**
@@ -336,12 +340,26 @@ public final class SalesforceGateway implements OrgGateway {
      * org: booleans -> Boolean, integral numbers -> Integer (or Long on int overflow),
      * fractional numbers -> {@link Decimal}, everything else (Id/date/datetime/text) ->
      * String. The integral/fractional split mirrors {@link JSON#deserializeUntyped} and
-     * uses BigDecimal.scale to avoid a double round-trip. Nested objects/arrays (parent
-     * records, subqueries) keep their existing raw-JSON-string behavior — out of scope.
+     * uses BigDecimal.scale to avoid a double round-trip.
+     *
+     * <p>Nested objects become records, matching the dynamic relationship accessors: a child
+     * subquery (a JSON object carrying a "records" array) -> a {@link List} of {@link SObject}
+     * (read back via {@code rec.getSObjects(name)} / a child-relationship {@code __r} access); a
+     * parent record (a nested object without "records") -> a single {@link SObject}
+     * ({@code rec.getSObject(name)}). This is what populates {@code parent.Children__r} at runtime.
      */
     private static Object jsonValue(JsonElement el) {
         if (el.isJsonNull()) {
             return null;
+        }
+        if (el.isJsonObject()) {
+            JsonObject obj = el.getAsJsonObject();
+            if (obj.has("records")) {
+                List<SObject> children = new List<>();
+                appendRecords(obj, children); // child subquery -> alloyx List<SObject>
+                return children;
+            }
+            return parseRecord(obj); // parent record -> nested SObject
         }
         if (el.isJsonPrimitive()) {
             var p = el.getAsJsonPrimitive();

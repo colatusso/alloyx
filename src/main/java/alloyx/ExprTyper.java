@@ -167,7 +167,17 @@ final class ExprTyper {
         if (parent != null) {
             String ft = schema.fieldType(parent, p.name());
             // a relationship hop yields the related sObject (non-scalar); a value field its type
-            return ft;
+            if (ft != null) {
+                return ft;
+            }
+            // a child-relationship collection (ord.OrderItems__r): not a field of the parent
+            // (it lives in the parent's childRelationships describe, which the synced schema
+            // doesn't store), so we can't know the child sObject. Type it List<SObject> — the
+            // List<SObject> covariance + dynamic getSObjects() routing carry it from here.
+            if (isChildRelationship(parent, p.name())) {
+                return "List<SObject>";
+            }
+            return null;
         }
         // user-class field via the member type index, keyed by the target's declared class
         String declared = typeOf(p.target());
@@ -350,6 +360,16 @@ final class ExprTyper {
         }
         String b = base(t);
         return isSObjectName(b) ? b : null;
+    }
+
+    // A `<X>__r` member on a typed sObject that the parent's field map does NOT carry — i.e. a
+    // CHILD-relationship collection (the field map holds parent-ref `__r` names typed as the related
+    // sObject; a child collection lives only in the parent's childRelationships describe, which the
+    // synced schema doesn't store). The caller already established `schema.fieldType` returned null
+    // for this name, so any `__r` here is a child collection. Case-insensitive `__r` suffix, as Apex.
+    boolean isChildRelationship(String parent, String member) {
+        return parent != null && member != null
+            && member.regionMatches(true, member.length() - 3, "__r", 0, 3);
     }
 
     private boolean isSObjectName(String base) {

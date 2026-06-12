@@ -96,6 +96,38 @@ class SalesforceGatewayTest {
         assertEquals(0, SObject.asDecimal(r.get("Amount")).compareTo(new Decimal("100")));
     }
 
+    @Test
+    void parseRecords_childSubquery_becomesListOfSObject() {
+        // A SOQL child subquery comes back as a nested object carrying its own "records" array.
+        // The gateway parses it into an alloyx List<SObject> under the relationship name, so a
+        // child-relationship access (parent.OrderItems__r -> getSObjects("OrderItems__r")) reads it.
+        String json = "{\"done\":true,\"records\":[{\"attributes\":{\"type\":\"Order__c\"},"
+            + "\"Name\":\"O-1\",\"OrderItems__r\":{\"totalSize\":2,\"done\":true,\"records\":["
+            + "{\"attributes\":{\"type\":\"OrderItem__c\"},\"Name\":\"L1\",\"Quantity__c\":3},"
+            + "{\"attributes\":{\"type\":\"OrderItem__c\"},\"Name\":\"L2\",\"Quantity__c\":7}]}}]}";
+        SObject order = SalesforceGateway.parseRecords(json).get(0);
+
+        List<SObject> items = order.getSObjects("OrderItems__r");
+        assertEquals(2, items.size());
+        assertEquals("L1", items.get(0).get("Name"));
+        assertEquals(3, items.get(0).get("Quantity__c"));
+        assertEquals("OrderItem__c", items.get(1).getSObjectType().toString());
+    }
+
+    @Test
+    void parseRecords_parentRecord_becomesNestedSObject() {
+        // A parent relationship (Account) comes back as a nested record object (no "records" array);
+        // it parses into a single nested SObject, read back via getSObject(name).
+        String json = "{\"done\":true,\"records\":[{\"attributes\":{\"type\":\"Order__c\"},"
+            + "\"Name\":\"O-1\",\"Account__r\":{\"attributes\":{\"type\":\"Account\"},"
+            + "\"Name\":\"Acme\"}}]}";
+        SObject order = SalesforceGateway.parseRecords(json).get(0);
+
+        SObject account = order.getSObject("Account__r");
+        assertEquals("Acme", account.get("Name"));
+        assertEquals("Account", account.getSObjectType().toString());
+    }
+
     // ------------------------------------------------------------------
     // upsert split (Id -> update/PATCH, no Id -> insert/POST)
     // ------------------------------------------------------------------
