@@ -147,7 +147,11 @@ final class Transpiler {
                 alloyx.runtime.Type.class, alloyx.runtime.Limits.class, alloyx.runtime.Assert.class,
                 alloyx.runtime.ApexPages.class, alloyx.runtime.Schema.class, alloyx.runtime.Label.class,
                 alloyx.runtime.EncodingUtil.class, alloyx.runtime.Blob.class, alloyx.runtime.Http.class,
-                alloyx.runtime.Trigger.class, alloyx.runtime.PageReference.class)) {
+                alloyx.runtime.Trigger.class, alloyx.runtime.PageReference.class,
+                // Strings backs the Apex `String` class's STATICS (String.valueOf/join/isBlank...): the
+                // String-static router emits `Strings.<m>`, so its method names must fold here too
+                // (`String.valueof(x)` -> `Strings.valueOf(x)`), like every other platform class.
+                alloyx.runtime.Strings.class)) {
             m.put(c.getSimpleName().toLowerCase(java.util.Locale.ROOT), c);
         }
         return java.util.Map.copyOf(m);
@@ -169,6 +173,60 @@ final class Transpiler {
             }
         }
         return lowerFirst(method);
+    }
+
+    // The runtime/JDK-backed class a scalar/collection Apex BASE type name is emitted as (the receiver
+    // of an instance call). Keyed by the lowercased Apex base name (Apex is case-insensitive). Only
+    // types whose instance methods land on a real Java class are listed — a dynamic SObject / user
+    // class is intentionally absent, so an instance call on one is never case-folded (its method name
+    // is left exactly as written). String/Id -> java.lang.String (instance String methods stay on the
+    // real String; the Strings helper carries only statics + the few Java lacks). Mirrors mapType's
+    // runtime-type decisions, but yields the Class itself for reflective case folding.
+    private static final java.util.Map<String, Class<?>> INSTANCE_RECEIVER_CLASSES =
+        instanceReceiverClasses();
+
+    private static java.util.Map<String, Class<?>> instanceReceiverClasses() {
+        java.util.Map<String, Class<?>> m = new java.util.HashMap<>();
+        m.put("string", String.class);
+        m.put("id", String.class); // Id is a String at runtime
+        m.put("list", alloyx.runtime.List.class);
+        m.put("set", alloyx.runtime.Set.class);
+        m.put("map", alloyx.runtime.Map.class);
+        m.put("decimal", alloyx.runtime.Decimal.class);
+        m.put("date", alloyx.runtime.Date.class);
+        m.put("datetime", alloyx.runtime.Datetime.class);
+        m.put("time", alloyx.runtime.Time.class);
+        m.put("blob", alloyx.runtime.Blob.class);
+        return java.util.Map.copyOf(m);
+    }
+
+    // Per-class cache of (lowercased method name -> canonical Java instance-method name) for the
+    // runtime/JDK receiver classes. Built lazily by reflecting the class's public INSTANCE methods,
+    // so the reflective scan runs once per class, not once per call. A name absent from the map has
+    // no instance method of that spelling on the class (it falls through to the verbatim name).
+    private static final java.util.Map<Class<?>, java.util.Map<String, String>> INSTANCE_METHOD_FOLD =
+        new java.util.concurrent.ConcurrentHashMap<>();
+
+    // The canonically-cased Java instance-method name on `receiverClass` matching `method`
+    // case-INSENSITIVELY (Apex is), or `method` unchanged when no instance method matches. An
+    // exact-case match short-circuits (the index keys are lowercased, but the stored value is the
+    // canonical spelling, so a correctly-cased call resolves to itself with no extra work).
+    private static String foldInstanceMethod(Class<?> receiverClass, String method) {
+        java.util.Map<String, String> index = INSTANCE_METHOD_FOLD.computeIfAbsent(
+            receiverClass, Transpiler::buildInstanceFoldIndex);
+        String folded = index.get(method.toLowerCase(java.util.Locale.ROOT));
+        return folded != null ? folded : method; // unknown name: leave exactly as written
+    }
+
+    private static java.util.Map<String, String> buildInstanceFoldIndex(Class<?> c) {
+        java.util.Map<String, String> index = new java.util.HashMap<>();
+        for (java.lang.reflect.Method jm : c.getMethods()) {
+            if (!java.lang.reflect.Modifier.isStatic(jm.getModifiers())) {
+                // first canonical spelling wins; an exact-cased Apex call still folds to itself
+                index.putIfAbsent(jm.getName().toLowerCase(java.util.Locale.ROOT), jm.getName());
+            }
+        }
+        return index;
     }
     // Apex trigger context members -> the runtime Trigger stub's fields (case-insensitive,
     // as Apex is); `new` is a Java keyword so it maps to newRecords.
@@ -777,7 +835,7 @@ final class Transpiler {
             sb.append(mapType(f.type())).append(' ').append(f.name());
             // Apex widens an Integer initializer to a Decimal field (private Decimal total = 0);
             // Java needs it explicit, so coerce through the same path the locals/params use.
-            if (f.init() != null) sb.append(" = ").append(coerceDecimal(f.type(), f.init()));
+            if (f.init() != null) sb.append(" = ").append(coerceNumeric(f.type(), f.init()));
             sb.append(";\n");
         }
 
@@ -905,6 +963,12 @@ final class Transpiler {
                     // the typed-vs-generic decision is the var's, not the query's
                     sb.append(indent).append(mapType(v.type())).append(' ').append(v.name())
                       .append(" = ").append(emitTypedInit(v.type(), v.init())).append(";\n");
+                } else if (isTypedSObjectList(v.type()) && iterableIsSObjectList(v.init())) {
+                    // List<OrderItem__c> lines = ord.OrderItems__r; — the init types List<SObject>
+                    // (a child-relationship read / query helper), the declared slot is a typed list,
+                    // so apply the same .many() covariance wrap the for-each/SOQL-return sites use.
+                    sb.append(indent).append(mapType(v.type())).append(' ').append(v.name())
+                      .append(" = ").append(emitListCovariant(v.type(), v.init())).append(";\n");
                 } else if (v.init() instanceof Prop pr && isSObject(pr.target())
                         && !isTyped(sObjectTypeOf(pr.target()))) {
                     // untyped sObject field read: get() returns Object, cast to declared type
@@ -916,10 +980,10 @@ final class Transpiler {
                     // (not var) so an Integer x = a.Name mismatch is a compile error
                     sb.append(indent).append(mapType(v.type())).append(' ').append(v.name())
                       .append(" = ").append(emitExpr(v.init())).append(";\n");
-                } else if (mapType(v.type()).equals("Decimal") && isIntegerExpr(v.init())) {
-                    // Apex widens Integer to Decimal; Java needs the explicit conversion
-                    sb.append(indent).append("Decimal ").append(v.name())
-                      .append(" = ").append(coerceDecimal(v.type(), v.init())).append(";\n");
+                } else if (isDecimalOrDoubleType(v.type()) && isIntegerExpr(v.init())) {
+                    // Apex widens Integer to Decimal/Double; Java needs the explicit conversion
+                    sb.append(indent).append(mapType(v.type())).append(' ').append(v.name())
+                      .append(" = ").append(coerceNumeric(v.type(), v.init())).append(";\n");
                 } else {
                     sb.append(indent).append("var ").append(v.name())
                       .append(" = ").append(emitExpr(v.init())).append(";\n");
@@ -936,7 +1000,7 @@ final class Transpiler {
                         // typed: a.Name = x -> a.setName(x) (javac checks the value's type)
                         sb.append(indent).append(emitExpr(pr.target())).append(".set")
                           .append(schema.canonicalField(parent, pr.name())).append('(')
-                          .append(coerceDecimal(schema.fieldType(parent, pr.name()), a.value())).append(");\n");
+                          .append(coerceNumeric(schema.fieldType(parent, pr.name()), a.value())).append(");\n");
                     } else {
                         sb.append(indent).append(emitExpr(pr.target())).append(".put(\"")
                           .append(pr.name()).append("\", ").append(emitExpr(a.value())).append(");\n");
@@ -946,6 +1010,12 @@ final class Transpiler {
                     // x = [SELECT...] -> re-type the query result to x's declared type
                     sb.append(indent).append(sn.ident()).append(" = ")
                       .append(emitTypedInit(locals.get(sn.ident()), a.value())).append(";\n");
+                } else if (a.target() instanceof Name cn && locals.containsKey(cn.ident())
+                        && isTypedSObjectList(locals.get(cn.ident())) && iterableIsSObjectList(a.value())) {
+                    // lines = ord.OrderItems__r; — the value types List<SObject>, the target is a
+                    // typed-sObject-list local, so re-type via the same .many() covariance wrap.
+                    sb.append(indent).append(cn.ident()).append(" = ")
+                      .append(emitListCovariant(locals.get(cn.ident()), a.value())).append(";\n");
                 } else if (a.target() instanceof Name nm && locals.containsKey(nm.ident())
                         && a.value() instanceof Prop vp && isSObject(vp.target())
                         && !isTyped(sObjectTypeOf(vp.target()))) {
@@ -954,17 +1024,17 @@ final class Transpiler {
                     sb.append(indent).append(nm.ident()).append(" = (").append(t).append(") ")
                       .append(emitExpr(a.value())).append(";\n");
                 } else if (a.target() instanceof Name dnm && locals.containsKey(dnm.ident())
-                        && mapType(locals.get(dnm.ident())).equals("Decimal") && isIntegerExpr(a.value())) {
-                    // Apex widens Integer to Decimal on assignment; Java needs it explicit
+                        && isDecimalOrDoubleType(locals.get(dnm.ident())) && isIntegerExpr(a.value())) {
+                    // Apex widens Integer to Decimal/Double on assignment; Java needs it explicit
                     sb.append(indent).append(dnm.ident()).append(" = ")
-                      .append(coerceDecimal(locals.get(dnm.ident()), a.value())).append(";\n");
+                      .append(coerceNumeric(locals.get(dnm.ident()), a.value())).append(";\n");
                 } else if (a.target() instanceof Prop pp && propFieldType(pp) != null
                         && isIntegerExpr(a.value())
-                        && mapType(propFieldType(pp)).equals("Decimal")) {
-                    // cross-class user field of Decimal type (cart.cost = 333): widen the Integer,
-                    // now that the member-type index makes the field's declared type resolvable
+                        && isDecimalOrDoubleType(propFieldType(pp))) {
+                    // cross-class user field of Decimal/Double type (cart.cost = 333): widen the
+                    // Integer, now that the member-type index makes the field's declared type resolvable
                     sb.append(indent).append(emitExpr(a.target())).append(" = ")
-                      .append(coerceDecimal(propFieldType(pp), a.value())).append(";\n");
+                      .append(coerceNumeric(propFieldType(pp), a.value())).append(";\n");
                 } else {
                     sb.append(indent).append(emitExpr(a.target())).append(" = ")
                       .append(emitExpr(a.value())).append(";\n");
@@ -988,7 +1058,7 @@ final class Transpiler {
                     // untyped return of an sObject field -> cast Object back to the return type
                     sb.append(" (").append(mapType(currentReturnType)).append(") ").append(emitExpr(r.value()));
                 } else if (r.value() != null) {
-                    sb.append(' ').append(coerceDecimal(currentReturnType, r.value()));
+                    sb.append(' ').append(coerceNumeric(currentReturnType, r.value()));
                 }
                 sb.append(";\n");
             }
@@ -1158,7 +1228,8 @@ final class Transpiler {
             case Index ix -> emitExpr(ix.target()) + ".get(" + emitExpr(ix.index()) + ")";
             case ListLit l -> l.elements().isEmpty()
                 ? "new " + mapType(l.type()) + "()"
-                : "new " + mapType(l.type()) + "(java.util.Arrays.asList(" + emitArgs(l.elements()) + "))";
+                : "new " + mapType(l.type()) + "(java.util.Arrays.asList("
+                    + emitListElements(l.type(), l.elements()) + "))";
             case MapLit m -> emitMapLit(m);
             case Prop p -> emitProp(p);
             case MethodCall mc -> emitMethodCall(mc);
@@ -1785,16 +1856,46 @@ final class Transpiler {
                 && typer.isKnownTypeName(tn.ident())
             ? tn.ident() : typer.typeOf(mc.target());
         String args = emitMethodArgs(klass, name, mc.args());
-        return emitExpr(mc.target()) + "." + name + "(" + args + ")";
+        // Apex instance calls are case-insensitive (s.toUppercase(), list.deepClone()): when the
+        // receiver's static type resolves to a runtime/JDK-backed class, fold the method name to that
+        // class's canonical Java spelling — the same reflective folding the static path uses. The
+        // receiver type comes from the typer (typeOf), NOT from `klass` above, which may instead hold
+        // a STATIC-call class name. An unknown/dynamic receiver maps to no class, so the name is left
+        // exactly as written (a user-class method's case-insensitivity is a separate concern).
+        String emitted = foldReceiverInstanceMethod(typer.typeOf(mc.target()), name);
+        return emitExpr(mc.target()) + "." + emitted + "(" + args + ")";
     }
 
-    // emitArgs, coercing each Integer arg into the declared param type of `klass.method`.
+    // The canonically-cased Java instance-method name for a call whose receiver has Apex type
+    // `receiverApexType`, when that type maps to a runtime/JDK-backed class (String/Id, List/Set/Map,
+    // Decimal, Date/Datetime/Time, Blob); else `name` unchanged. Null/unknown receiver -> unchanged.
+    private static String foldReceiverInstanceMethod(String receiverApexType, String name) {
+        if (receiverApexType == null) {
+            return name;
+        }
+        Class<?> rc = INSTANCE_RECEIVER_CLASSES.get(base(receiverApexType).toLowerCase(java.util.Locale.ROOT));
+        return rc == null ? name : foldInstanceMethod(rc, name);
+    }
+
+    // emitArgs, coercing each arg into the declared param type of `klass.method`.
     private String emitMethodArgs(String klass, String method, List<Expr> args) {
         List<String> out = new ArrayList<>();
         for (int i = 0; i < args.size(); i++) {
-            out.add(coerceDecimal(paramTypeOf(klass, method, i), args.get(i)));
+            out.add(coerceArg(paramTypeOf(klass, method, i), args.get(i)));
         }
         return String.join(", ", out);
+    }
+
+    // The single per-argument coercion at a CALL site, given the callee's declared param type: the
+    // List<SObject>->List<Typed> covariance wrap when the param is a typed-sObject list (Java is
+    // invariant, so a child-relationship/query-helper List<SObject> arg can't bind directly), else
+    // the Integer->Decimal widening. Mutually exclusive (a List arg is never a Decimal); an unknown
+    // param type (null/AMBIGUOUS) takes neither and emits the arg unchanged — no behavior change.
+    private String coerceArg(String paramType, Expr arg) {
+        if (isTypedSObjectList(paramType) && iterableIsSObjectList(arg)) {
+            return emitListCovariant(paramType, arg);
+        }
+        return coerceNumeric(paramType, arg);
     }
 
     private static String lowerFirst(String s) {
@@ -1845,11 +1946,14 @@ final class Transpiler {
         if (m.keys().isEmpty()) {
             return "new " + mapType(m.type()) + "()";
         }
+        // the declared VALUE type (Map<K,V> -> V): widen an Integer value literal into a Decimal/Double
+        // value slot, exactly as the assignment/arg sites do (Apex widens; Java won't for a class/box).
+        String valueType = firstGeneric(m.type());
         // double-brace init: works for any key/value type without a runtime factory
         StringBuilder sb = new StringBuilder("new ").append(mapType(m.type())).append("(){{");
         for (int i = 0; i < m.keys().size(); i++) {
             sb.append(" put(").append(emitExpr(m.keys().get(i))).append(", ")
-              .append(emitExpr(m.values().get(i))).append(");");
+              .append(coerceNumeric(valueType, m.values().get(i))).append(");");
         }
         return sb.append(" }}").toString();
     }
@@ -1873,31 +1977,45 @@ final class Transpiler {
         return isDecimal(e) ? emitExpr(e) : "Decimal.valueOf(" + emitExpr(e) + ")";
     }
 
-    // Apex widens Integer to Decimal implicitly; Java won't (Decimal is a class). Where the
-    // expected type is Decimal and the value is an Integer, wrap it so the assignment/return
-    // type-checks. Everywhere else the value is emitted unchanged (no behavior change).
-    private String coerceDecimal(String expectedApexType, Expr value) {
-        return coerceDecimal(expectedApexType, value, value);
+    // Apex widens Integer to Decimal OR Double implicitly; Java widens to neither boxed type on its
+    // own. Where the expected type is Decimal/Double and the value is an Integer, wrap it so the
+    // assignment/return/arg type-checks. Everywhere else the value is emitted unchanged (no change).
+    private String coerceNumeric(String expectedApexType, Expr value) {
+        return coerceNumeric(expectedApexType, value, value);
     }
 
     // The widen DECISION runs on `typed` (the original expr the typer can type), but the emitted
     // text comes from `emit` (possibly an enclosing-qualified rewrite of `typed` — see emitSObject).
     // When the two are identical this is the plain coerce; the split only matters inside a typed
     // sObject literal where the arg value was rewritten to escape the anon init block's `this`.
-    private String coerceDecimal(String expectedApexType, Expr typed, Expr emit) {
-        // a ternary in a Decimal context (Decimal d = c ? 0 : 1): widen PER BRANCH rather than
-        // wrap the whole conditional in Decimal.valueOf(Object) — keeps each branch statically
-        // typed. emitTernary already widens a mixed Decimal/Integer ternary on its own; this adds
-        // the all-Integer case, which only needs widening because the surrounding type is Decimal.
-        if (typed instanceof Ternary t && emit instanceof Ternary et && isDecimalType(expectedApexType)) {
+    private String coerceNumeric(String expectedApexType, Expr typed, Expr emit) {
+        // a ternary in a Decimal/Double context (Decimal d = c ? 0 : 1): widen PER BRANCH rather than
+        // wrap the whole conditional in valueOf(Object) — keeps each branch statically typed.
+        // emitTernary already widens a mixed Decimal/Integer ternary on its own; this adds the
+        // all-Integer case, which only needs widening because the surrounding type is Decimal/Double.
+        if (typed instanceof Ternary t && emit instanceof Ternary et
+                && (isDecimalType(expectedApexType) || isDoubleType(expectedApexType))) {
             return "(" + emitExpr(et.cond())
-                + " ? " + coerceDecimal(expectedApexType, t.then(), et.then())
-                + " : " + coerceDecimal(expectedApexType, t.els(), et.els()) + ")";
+                + " ? " + coerceNumeric(expectedApexType, t.then(), et.then())
+                + " : " + coerceNumeric(expectedApexType, t.els(), et.els()) + ")";
         }
         if (typer.needsDecimalWiden(expectedApexType, typed)) {
             return "Decimal.valueOf(" + emitExpr(emit) + ")";
         }
+        // Integer -> Double: an unboxing+widening cast Java accepts (Integer -> int -> double),
+        // boxed back via Double.valueOf so the value's type matches the Double slot.
+        if (typer.needsDoubleWiden(expectedApexType, typed)) {
+            return "Double.valueOf((double)(" + emitExpr(emit) + "))";
+        }
         return emitExpr(emit);
+    }
+
+    private boolean isDoubleType(String apexType) {
+        return apexType != null && base(apexType).equalsIgnoreCase("Double");
+    }
+
+    private boolean isDecimalOrDoubleType(String apexType) {
+        return isDecimalType(apexType) || isDoubleType(apexType);
     }
 
     private boolean isDecimalType(String apexType) {
@@ -2002,7 +2120,7 @@ final class Transpiler {
     private String emitCtorArgs(String klass, List<Expr> args) {
         List<String> out = new ArrayList<>();
         for (int i = 0; i < args.size(); i++) {
-            out.add(coerceDecimal(ctorParamTypeOf(klass, i), args.get(i)));
+            out.add(coerceArg(ctorParamTypeOf(klass, i), args.get(i)));
         }
         return String.join(", ", out);
     }
@@ -2028,6 +2146,16 @@ final class Transpiler {
         return String.join(", ", out);
     }
 
+    // emitArgs for the elements of a List/Set literal, widening an Integer element into the declared
+    // element type's Decimal/Double slot (new List<Decimal>{ 1, 2 }) — Apex widens; Java won't for a
+    // boxed/class element. The element type is the collection's single generic (firstGeneric).
+    private String emitListElements(String collectionType, List<Expr> elements) {
+        String elemType = firstGeneric(collectionType);
+        List<String> out = new ArrayList<>();
+        for (Expr e : elements) out.add(coerceNumeric(elemType, e));
+        return String.join(", ", out);
+    }
+
     // Like emitArgs, but for a bare same-class method call: coerce an Integer argument into a
     // Decimal where the declared parameter is Decimal (Apex widens; Java needs the conversion).
     // The callee param types come from the current class's member index; an unknown callee
@@ -2035,7 +2163,7 @@ final class Transpiler {
     private String emitCallArgs(String callee, List<Expr> args) {
         List<String> out = new ArrayList<>();
         for (int i = 0; i < args.size(); i++) {
-            out.add(coerceDecimal(paramTypeOf(callee, i), args.get(i)));
+            out.add(coerceArg(paramTypeOf(callee, i), args.get(i)));
         }
         return String.join(", ", out);
     }
@@ -2128,7 +2256,7 @@ final class Transpiler {
             StringBuilder sb = new StringBuilder("new ").append(base).append("(){{");
             for (FieldInit f : so.fields()) {
                 sb.append(" set").append(schema.canonicalField(base, f.name())).append('(')
-                  .append(coerceDecimal(schema.fieldType(base, f.name()),
+                  .append(coerceNumeric(schema.fieldType(base, f.name()),
                                         f.value(), qualifyEnclosing(f.value()))).append(");");
             }
             return sb.append(" }}").toString();
@@ -2138,7 +2266,7 @@ final class Transpiler {
         StringBuilder sb = new StringBuilder("new SObject(\"").append(base).append('"');
         for (FieldInit f : so.fields()) {
             sb.append(", \"").append(f.name()).append("\", ")
-              .append(coerceDecimal(schema.fieldType(base, f.name()), f.value()));
+              .append(coerceNumeric(schema.fieldType(base, f.name()), f.value()));
         }
         return sb.append(')').toString();
     }
@@ -2189,6 +2317,29 @@ final class Transpiler {
         }
         String t = typer.typeOf(iterable);
         return t != null && base(t).equals("List") && base(firstGeneric(t)).equals("SObject");
+    }
+
+    // Whether an Apex type is a List/Set/Map whose (single) element is a generated typed sObject —
+    // the slot shape the List<SObject> covariance wrap targets (List<Account>, account[]).
+    private boolean isTypedSObjectList(String declaredType) {
+        return declaredType != null && isCollectionType(base(declaredType))
+            && isTyped(base(firstGeneric(declaredType)));
+    }
+
+    // Apex List covariance at a typed slot: when the DECLARED target/param type is a typed-sObject
+    // list (List<Account>) and `value` types as List<SObject> (a child-relationship read, a generic
+    // query helper), re-type each row via the generated wrapper — `Account.many(value)` — exactly as
+    // the for-each / direct-SOQL-return sites do. Java generics are invariant, so a bare List<SObject>
+    // can't bind a List<Typed> slot directly. Returns the emitted argument text: the .many() wrap when
+    // the covariance applies, else `value` unchanged (no behavior change for any other shape).
+    private String emitListCovariant(String declaredType, Expr value) {
+        if (declaredType != null && isCollectionType(base(declaredType))) {
+            String elem = base(firstGeneric(declaredType));
+            if (isTyped(elem) && iterableIsSObjectList(value)) {
+                return typedName(elem) + ".many(" + emitExpr(value) + ")"; // typed list (canonical)
+            }
+        }
+        return emitExpr(value);
     }
 
     // the element type of a generic: List<Account> -> Account, Map<Id,Account> -> Account

@@ -18,6 +18,11 @@ public final class ApexPages {
     // accumulate here for the duration of the run; clearMessages() resets it (tests isolate via it).
     private static final List<Message> MESSAGES = new List<>();
 
+    // Process-static current page. There's no live Visualforce request locally, so the "current page"
+    // is whatever Test.setCurrentPage last installed (mirroring how Apex tests seed the page context);
+    // null means none was set, and currentPage() then stands in an empty PageReference.
+    private static PageReference currentPage;
+
     public static void addMessage(Object message) {
         MESSAGES.add((Message) message);
     }
@@ -50,10 +55,19 @@ public final class ApexPages {
         MESSAGES.clear();
     }
 
-    /** Apex {@code ApexPages.currentPage()}: no Visualforce page context locally, so an empty
-     *  PageReference (no params) stands in — readable like the real one, just unpopulated. */
+    /** Apex {@code ApexPages.currentPage()}: returns the page installed via
+     *  {@link #setCurrentPage(PageReference)} (i.e. {@code Test.setCurrentPage(...)}). With no page
+     *  set there's no Visualforce request locally, so an empty PageReference (no params) stands in —
+     *  readable like the real one, just unpopulated. */
     public static PageReference currentPage() {
-        return new PageReference("");
+        return currentPage != null ? currentPage : new PageReference("");
+    }
+
+    /** Install the process-static current page (Apex tests seed it via {@code Test.setCurrentPage}).
+     *  A null clears it, so {@link #currentPage()} falls back to the empty stand-in. Not a page-bound
+     *  org operation — pure local state — so it runs for real, keeping the two consistent. */
+    public static void setCurrentPage(PageReference page) {
+        currentPage = page;
     }
 
     /**

@@ -30,18 +30,20 @@ final class ExprTyper {
     // String instance methods (Java's own, emitted as raw `.m()`) whose result is itself a
     // String — enough to type a chained `s.trim().split(...)` target. Kept conservative: only
     // methods we are certain return String. size()/length() handled separately (-> Integer).
-    private static final Set<String> STRING_TO_STRING = Set.of(
+    // Stored LOWERCASED: Apex is case-insensitive, so the result of `s.toUppercase()` is still a
+    // String and a chained `.subString(..)` on it must type — the lookup folds the call name to lower.
+    private static final Set<String> STRING_TO_STRING = lower(
         "trim", "toLowerCase", "toUpperCase", "substring", "replace", "replaceAll",
         "replaceFirst", "abbreviate", "capitalize", "deleteWhitespace", "left", "right",
         "normalizeSpace", "reverse", "strip", "stripStart", "stripEnd",
         "substringAfter", "substringBefore", "substringBetween", "removeStart", "removeEnd");
 
-    // String instance methods whose result is an Integer.
-    private static final Set<String> STRING_TO_INT = Set.of(
+    // String instance methods whose result is an Integer (lowercased; case-insensitive lookup).
+    private static final Set<String> STRING_TO_INT = lower(
         "length", "size", "indexOf", "lastIndexOf", "countMatches", "compareTo");
 
-    // String instance methods whose result is a Boolean.
-    private static final Set<String> STRING_TO_BOOL = Set.of(
+    // String instance methods whose result is a Boolean (lowercased; case-insensitive lookup).
+    private static final Set<String> STRING_TO_BOOL = lower(
         "contains", "startsWith", "endsWith", "equals", "equalsIgnoreCase",
         "isAllUpperCase", "isAllLowerCase", "isAlpha", "isNumeric", "isBlank", "matches");
 
@@ -224,9 +226,10 @@ final class ExprTyper {
 
     private String typeOfMethodCall(MethodCall mc) {
         String target = typeOf(mc.target());
-        // String instance methods we know the result type of (chained typing).
+        // String instance methods we know the result type of (chained typing). The name is folded to
+        // lowercase before lookup: Apex is case-insensitive, so `s.toUppercase()` types as String too.
         if ("String".equals(target)) {
-            String name = mc.name();
+            String name = mc.name().toLowerCase(Locale.ROOT);
             if (STRING_TO_STRING.contains(name)) {
                 return "String";
             }
@@ -371,6 +374,14 @@ final class ExprTyper {
     boolean needsDecimalWiden(String expectedApexType, Expr value) {
         return expectedApexType != null
             && base(expectedApexType).equalsIgnoreCase("Decimal")
+            && isInteger(value);
+    }
+
+    /** Whether the expected Apex type is Double and the value an Integer. Apex widens Integer to
+     *  Double implicitly (as it does to Decimal); Java widens to neither boxed type on its own. */
+    boolean needsDoubleWiden(String expectedApexType, Expr value) {
+        return expectedApexType != null
+            && base(expectedApexType).equalsIgnoreCase("Double")
             && isInteger(value);
     }
 
