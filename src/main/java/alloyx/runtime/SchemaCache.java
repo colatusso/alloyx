@@ -131,6 +131,26 @@ public final class SchemaCache implements SchemaProvider {
         return false;
     }
 
+    /**
+     * The org's canonical API name for a (possibly mis-cased) sObject reference, or the input
+     * when no global describe is available (lenient path). A code scan turns up identifiers in
+     * whatever case the source used — e.g. a variable named {@code account} — and generated
+     * classes MUST use one canonical spelling: on a case-insensitive filesystem (macOS APFS),
+     * account.java and Account.java are the same file, so mixed casings clobber each other.
+     */
+    public String canonicalSObject(String name) {
+        java.util.Set<String> known = knownSObjects();
+        if (known == null || known.contains(name)) {
+            return name;
+        }
+        for (String k : known) {
+            if (k.equalsIgnoreCase(name)) {
+                return k;
+            }
+        }
+        return name;
+    }
+
     /** Resolve a (possibly mis-cased) field name to its canonical describe key. */
     @Override
     public String canonicalField(String sobjectType, String fieldName) {

@@ -100,7 +100,10 @@ final class Workspace {
         for (String name : SObjectScan.referenced(decls)) {
             if (!userClasses.contains(name) && !NON_SOBJECT.contains(name)
                     && !name.endsWith("Exception") && schema.isDescribed(name)) {
-                typedSObjects.add(name);
+                // canonical casing, deduped: the scan reports identifiers as written (a variable
+                // named `account` included), and mixed casings would clobber the generated .java
+                // on a case-insensitive filesystem
+                typedSObjects.add(schema.canonicalSObject(name));
             }
         }
 
@@ -444,7 +447,9 @@ final class Workspace {
         Set<String> typedSObjects = new LinkedHashSet<>();
         for (String name : candidateSObjects) {
             if (schema.isDescribed(name)) {
-                typedSObjects.add(name);
+                // canonical casing, deduped — same reason as the compile path: mixed casings
+                // clobber the generated .java on a case-insensitive filesystem
+                typedSObjects.add(schema.canonicalSObject(name));
             }
         }
         // The code names sObjects but the schema typed none AND no schema is loaded at all
