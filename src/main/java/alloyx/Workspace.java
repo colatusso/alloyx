@@ -521,17 +521,26 @@ final class Workspace {
             out.add(new Diag(d.getKind().toString(), apexLine, (int) d.getColumnNumber(),
                 apexify(msg)));
         }
-        // javac failed but every error sat on ANOTHER unit (a dep or a generated class), so the
-        // target was never fully type-checked. Returning [] here would be a FALSE CLEAN — batch
-        // validation proved hundreds of those. Surface one synthetic diagnostic instead.
+        // javac failed with nothing attributed to the target. Two very different cases hide here:
+        // a TRANSPILED USER DEP with its own errors is the designed leniency (javac still
+        // attributes the target with error recovery; isMissingKnownSymbol already suppresses the
+        // spillover) — stay quiet, same contract as always. But an error on a unit THIS TOOL
+        // GENERATED (a typed sObject class) means our own emission broke the compile set and the
+        // [] would be a false clean — batch validation caught hundreds (the case-clobber
+        // duplicate-class abort). Never mask our own breakage: surface one synthetic diagnostic.
         if (!compiled && out.isEmpty()) {
-            String why = collected.getDiagnostics().stream()
-                .filter(d -> d.getKind() == javax.tools.Diagnostic.Kind.ERROR)
+            collected.getDiagnostics().stream()
+                .filter(d -> d.getKind() == javax.tools.Diagnostic.Kind.ERROR && d.getSource() != null)
+                .filter(d -> {
+                    String unit = Path.of(d.getSource().getName()).getFileName().toString();
+                    return unit.endsWith(".java")
+                        && typedSObjects.contains(unit.substring(0, unit.length() - ".java".length()));
+                })
                 .findFirst()
-                .map(d -> (d.getSource() != null ? Path.of(d.getSource().getName()).getFileName() + ": " : "")
-                    + apexify(d.getMessage(null)))
-                .orElse("no diagnostic reported");
-            out.add(new Diag("ERROR", 1, 1, "workspace did not compile: " + why));
+                .ifPresent(d -> out.add(new Diag("ERROR", 1, 1,
+                    "workspace did not compile (generated "
+                        + Path.of(d.getSource().getName()).getFileName() + "): "
+                        + apexify(d.getMessage(null)))));
         }
         return out;
     }
