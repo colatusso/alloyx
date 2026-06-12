@@ -129,8 +129,33 @@ final class ExprTyper {
         };
     }
 
+    // Whether a local/param/field shadows `ident`, case-INSENSITIVELY (Apex names aren't case
+    // sensitive): a variable `account` shadows the `Account` type. Mirrors the Transpiler's guard so
+    // the field-token typing and field-token emission agree on what counts as a shadowing variable.
+    private boolean localsHasIgnoreCase(String ident) {
+        if (locals.containsKey(ident)) {
+            return true;
+        }
+        for (String declared : locals.keySet()) {
+            if (declared.equalsIgnoreCase(ident)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Whether an ident denotes the enclosing instance — bare `this`, or the synthetic qualified
+    // `<Cls>.this` the Transpiler's qualifyEnclosing emits inside a typed-sObject literal's anon init
+    // block. Both must resolve a trailing field/method against the enclosing class (NOT as a value),
+    // so the sObject field hop after `<Cls>.this.someField` keeps its typed-getter routing instead of
+    // degrading to a raw `.Field`. The class-qualifier form (`<Cls>` alone, for a STATIC) has no
+    // `.this` suffix and is intentionally excluded — it isn't the enclosing instance.
+    static boolean isThisRef(String ident) {
+        return ident != null && (ident.equals("this") || ident.endsWith(".this"));
+    }
+
     private String typeOfName(Name n) {
-        if (n.ident().equals("this")) {
+        if (isThisRef(n.ident())) {
             return null;
         }
         String t = locals.get(n.ident());
@@ -157,9 +182,10 @@ final class ExprTyper {
     }
 
     private String typeOfProp(Prop p) {
-        // this.<field>: fields are copied into locals, but `this` resolves to null, so look
-        // the field up in the current class body's field view.
-        if (p.target() instanceof Name tn && tn.ident().equals("this")) {
+        // this.<field> (or the synthetic <Cls>.this.<field> from a typed-literal rewrite): fields
+        // are copied into locals, but `this` resolves to null, so look the field up in the current
+        // class body's field view.
+        if (p.target() instanceof Name tn && isThisRef(tn.ident())) {
             Map<String, String> f = fieldTypes.get();
             String ft = f == null ? null : f.get(p.name());
             return ft != null ? ft : memberType(currentClassOf(), p.name());
@@ -183,8 +209,10 @@ final class ExprTyper {
         }
         // a STATIC field-token reference `Item__c.Id`: target is a bare TYPED sObject TYPE name
         // (not a local/instance) and the member is a described field -> the field token's type,
-        // so a `new List<Schema.SObjectField>{ Item__c.Id, ... }` literal accepts each element.
-        if (p.target() instanceof Name tn && !locals.containsKey(tn.ident())
+        // so a `new List<Schema.SObjectField>{ Item__c.Id, ... }` literal accepts each element. The
+        // shadow check is case-INSENSITIVE (Apex): a variable `account` shadows the `Account` type,
+        // so `account.Id` is an instance read (typed via the declared sObject below), not the token.
+        if (p.target() instanceof Name tn && !localsHasIgnoreCase(tn.ident())
                 && typedSObjects.has(tn.ident())
                 && schema.fieldType(tn.ident(), p.name()) != null) {
             return "Schema.SObjectField";
@@ -360,7 +388,7 @@ final class ExprTyper {
         String t = typeOf(e);
         if (t == null) {
             // this.<field> sObject: typeOf already consults fieldTypes, but a bare `this` is null
-            if (e instanceof Prop p && p.target() instanceof Name tn && tn.ident().equals("this")) {
+            if (e instanceof Prop p && p.target() instanceof Name tn && isThisRef(tn.ident())) {
                 Map<String, String> f = fieldTypes.get();
                 t = f == null ? null : f.get(p.name());
             }

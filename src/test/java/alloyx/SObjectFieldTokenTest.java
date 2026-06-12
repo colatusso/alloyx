@@ -153,6 +153,24 @@ class SObjectFieldTokenTest {
     }
 
     @Test
+    void localShadowingTheTypeName_differentCase_keepsInstanceSemantics() throws Exception {
+        // a LOCAL named `item__c` (lowercase) shadows the `Item__c` type CASE-INSENSITIVELY (Apex):
+        // `item__c.Name__c` must be an INSTANCE field access (typed setter/getter), not the static
+        // token — the shadow guard folds case, so a different-cased variable still wins over the type.
+        Path p = probe("ShadowLower", """
+            public class ShadowLower {
+                public static String go() {
+                    Item__c item__c = new Item__c();
+                    item__c.Name__c = 'inst';
+                    return item__c.Name__c;
+                }
+            }
+            """);
+        Class<?> c = Workspace.compile(List.of(p)).load("ShadowLower");
+        assertEquals("inst", c.getMethod("go").invoke(null));
+    }
+
+    @Test
     void instanceFieldAccess_stillRoutesThroughGetter_noRegression() throws Exception {
         // a normal instance field read item.Name__c must STILL go through the typed getter, unchanged
         // by the static-token path (the token only fires for a bare TYPE-name target).

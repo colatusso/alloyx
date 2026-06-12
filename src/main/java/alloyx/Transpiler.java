@@ -77,6 +77,19 @@ final class Transpiler {
     private static final Set<String> JAVA_SAME =
         Set.of("Integer", "Long", "Boolean", "String", "Object", "Double", "void");
     private static final Set<String> COLLECTIONS = Set.of("List", "Set", "Map");
+
+    // Whether a base type name is an Apex collection (List/Set/Map), matched case-INSENSITIVELY —
+    // Apex type names aren't case sensitive, so a `list<contact>` is the same type as `List<Contact>`.
+    private static boolean isCollectionType(String base) {
+        return base != null && COLLECTIONS.contains(capitalize(base));
+    }
+
+    // Capitalize the first letter (list -> List), leaving the rest untouched: enough to fold a
+    // lowercase Apex collection keyword onto its canonical COLLECTIONS spelling.
+    private static String capitalize(String s) {
+        return s.isEmpty() ? s
+            : Character.toUpperCase(s.charAt(0)) + s.substring(1).toLowerCase(java.util.Locale.ROOT);
+    }
     // Apex Schema namespace types backed by runtime classes (not dynamic sObjects)
     private static final Set<String> SCHEMA_TYPES =
         Set.of("SObjectType", "DescribeSObjectResult", "SObjectField");
@@ -139,6 +152,8 @@ final class Transpiler {
         java.util.Map.entry("double", "Double"), java.util.Map.entry("boolean", "Boolean"),
         java.util.Map.entry("string", "String"), java.util.Map.entry("object", "Object"),
         java.util.Map.entry("decimal", "Decimal"), java.util.Map.entry("date", "Date"),
+        // `id` (lowercase) is the same scalar as `Id`; folds to Id so mapType then returns String.
+        java.util.Map.entry("id", "Id"),
         java.util.Map.entry("datetime", "Datetime"), java.util.Map.entry("time", "Time"),
         java.util.Map.entry("list", "List"), java.util.Map.entry("set", "Set"),
         java.util.Map.entry("map", "Map"), java.util.Map.entry("system", "System"),
@@ -275,8 +290,8 @@ final class Transpiler {
     private String sObjectTypeOf(Expr e) {
         return switch (e) {
             case Name n -> {
-                String t = n.ident().equals("this") ? null : locals.get(n.ident());
-                if (t == null && !n.ident().equals("this") && !typer.isKnownTypeName(n.ident())) {
+                String t = ExprTyper.isThisRef(n.ident()) ? null : locals.get(n.ident());
+                if (t == null && !ExprTyper.isThisRef(n.ident()) && !typer.isKnownTypeName(n.ident())) {
                     // an inherited field read without `this.`: not in locals (only the current
                     // body's own fields are) — resolve through the member index's extends walk.
                     // A bare ident that NAMES a type (the target of a static call) is NOT an
@@ -290,12 +305,12 @@ final class Transpiler {
             case New nw -> isSObjectName(base(nw.type())) ? base(nw.type()) : null;
             case SObjectLit so -> base(so.type());
             case Prop p -> {
-                // this.<field>: resolve to the field's own declared type. Fields are
-                // copied into `locals`, but the target `this` resolves to null above,
-                // so this.lead.CNPJ__c would miss the getter without this. An INHERITED
-                // field isn't in locals (only the current body's fields are), so fall
-                // back to the member-type index, which walks the `extends` chain.
-                if (p.target() instanceof Name tn && tn.ident().equals("this")) {
+                // this.<field> (or the synthetic <Cls>.this.<field> a typed-literal rewrite emits):
+                // resolve to the field's own declared type. Fields are copied into `locals`, but the
+                // target `this` resolves to null above, so this.lead.CNPJ__c would miss the getter
+                // without this. An INHERITED field isn't in locals (only the current body's fields
+                // are), so fall back to the member-type index, which walks the `extends` chain.
+                if (p.target() instanceof Name tn && ExprTyper.isThisRef(tn.ident())) {
                     String ft0 = locals.get(p.name());
                     if (ft0 == null) {
                         ft0 = memberType(typer.currentClass, p.name());
@@ -351,7 +366,7 @@ final class Transpiler {
         // same-named Integer local that shadows a Decimal FIELD doesn't mistype `this.field`.
         // (The original bail returned null here, which the `declared == null` guard already did;
         // it just pre-empted this resolution — restoring it is what lets `this.field = 0` widen.)
-        if (p.target() instanceof Name tn && tn.ident().equals("this")) {
+        if (p.target() instanceof Name tn && ExprTyper.isThisRef(tn.ident())) {
             return typer.typeOf(p);
         }
         String declared = typer.typeOf(p.target());
@@ -1282,12 +1297,14 @@ final class Transpiler {
 
     // `Obj__c.Field` as a STATIC field-token reference (Schema.SObjectField), or null when this
     // Prop isn't that shape. The target must be a bare TYPE name (a typed sObject we generated a
-    // class for), NOT shadowed by a local/param — Apex variables win over types, so a local named
-    // Item__c keeps instance semantics (same locals-precedence guard the static-call path uses).
+    // class for), NOT shadowed by a local/param/field — Apex variables win over types, so a variable
+    // named Item__c keeps instance semantics. The shadow check is case-INSENSITIVE (Apex names are):
+    // a field declared `account` shadows the `Account` type, so `account.Id` (any case) is an INSTANCE
+    // read, never the static token. (locals carries the current body's own fields too — see emitMethod.)
     // The member must be a real described field; the token name is the canonical-cased API name so
     // `Item__c.id` binds to the emitted `public static final SObjectField Id`.
     private String staticFieldToken(Prop p) {
-        if (!(p.target() instanceof Name tn) || locals.containsKey(tn.ident())) {
+        if (!(p.target() instanceof Name tn) || localsHasIgnoreCase(tn.ident())) {
             return null;
         }
         // canonical casing: the field token lives on the generated `class Account`, so a `account.Id`
@@ -1301,7 +1318,7 @@ final class Transpiler {
 
     /** The declared (Apex) type of a target we can read cheaply: a local/param, or this.field. */
     private String declaredTypeOf(Expr e) {
-        if (e instanceof Name n && !n.ident().equals("this")) {
+        if (e instanceof Name n && !ExprTyper.isThisRef(n.ident())) {
             String t = locals.get(n.ident());
             if (t != null) {
                 return t;
@@ -1311,7 +1328,9 @@ final class Transpiler {
                 return n.ident();
             }
         }
-        if (e instanceof Prop pr && pr.target() instanceof Name tn && tn.ident().equals("this")) {
+        // this.field — or the synthetic <Cls>.this.field a typed-literal rewrite emits — reads a
+        // current-class field, whose type lives in locals (fields are seeded there per body).
+        if (e instanceof Prop pr && pr.target() instanceof Name tn && ExprTyper.isThisRef(tn.ident())) {
             return locals.get(pr.name());
         }
         return null;
@@ -1623,6 +1642,23 @@ final class Transpiler {
             }
         }
         return ident;
+    }
+
+    // Whether a local/param/field shadows `ident`, case-INSENSITIVELY (Apex names aren't case
+    // sensitive: a variable `account` shadows the `Account` type). `locals` is seeded with this
+    // body's own fields (emitMethod) plus params/locals as they're declared, so this one check
+    // covers every variable in scope. Used by the static field-token path so a typed-sObject value
+    // referenced by a same-named (any-case) variable stays an INSTANCE read, never a Schema token.
+    private boolean localsHasIgnoreCase(String ident) {
+        if (locals.containsKey(ident)) {
+            return true;
+        }
+        for (String declared : locals.keySet()) {
+            if (declared.equalsIgnoreCase(ident)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private String emitMapLit(MapLit m) {
@@ -1943,7 +1979,10 @@ final class Transpiler {
     private String emitTypedInit(String declaredType, Expr init) {
         if (init instanceof Soql) {
             String base = base(declaredType);
-            if (COLLECTIONS.contains(base)) {
+            // Apex type names are case-insensitive: a `list<contact>` return/var type must still
+            // re-type the query result (Contact.many(...)) the same as `List<Contact>`. Match the
+            // collection base case-insensitively (the elem isTyped/typedName checks already are).
+            if (isCollectionType(base)) {
                 String elem = base(firstGeneric(declaredType));
                 if (isTyped(elem)) {
                     return typedName(elem) + ".many(" + emitExpr(init) + ")"; // typed list (canonical)
