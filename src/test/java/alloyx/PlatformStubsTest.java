@@ -3,11 +3,15 @@
 package alloyx;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import alloyx.runtime.SchemaProvider;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -89,6 +93,53 @@ class PlatformStubsTest {
             }
             """);
         Workspace.compile(List.of(p)); // compiles == ConnectApi recognized
+    }
+
+    @Test
+    void connectApiVariableMemberAccess_roundTripsLocally() throws Exception {
+        // Fix B regression: a VARIABLE of a ConnectApi nested type is a dynamic SObject, so
+        // member writes/reads route through .put()/.get() and round-trip locally (the pre-stub
+        // behavior). Mapping ConnectApi.* to Object had killed member access on such variables.
+        Path p = probe("Pager", """
+            public class Pager {
+                public static Integer go() {
+                    ConnectApi.SomeInput input = new ConnectApi.SomeInput();
+                    input.page = 5;
+                    input.pageSize = 10;
+                    return input.page;
+                }
+            }
+            """);
+        Class<?> c = Workspace.compile(List.of(p)).load("Pager");
+        assertEquals(Integer.valueOf(5), c.getMethod("go").invoke(null));
+    }
+
+    @Test
+    void connectApiStaticChain_stillDegradesToUnsupported() throws Exception {
+        // Fix B must keep the STATIC chain degradation: a call rooted at the bare ConnectApi
+        // namespace can't be an SObject value, so it still emits the unsupported placeholder.
+        String java = transpile("""
+            public class Caller {
+                public static void go(String a, String b) {
+                    ConnectApi.ChatterFeeds.postFeedElement(a, b);
+                }
+            }
+            """);
+        assertTrue(java.contains("ConnectApi.unsupported(\"ChatterFeeds.postFeedElement\")"), java);
+        // the static call is the placeholder, never a bare (unresolvable) ConnectApi.X.y(...) call
+        assertFalse(java.contains("ConnectApi.ChatterFeeds.postFeedElement("), java);
+    }
+
+    // transpile a single class with no described schema (the static-chain shape needs no org).
+    private static String transpile(String src) {
+        ClassDecl cls = Parser.parse(src);
+        SchemaProvider noSchema = new SchemaProvider() {
+            @Override public String fieldType(String s, String f) { return null; }
+            @Override public boolean isDescribed(String s) { return false; }
+            @Override public String canonicalField(String s, String f) { return f; }
+            @Override public Map<String, String> fields(String s) { return null; }
+        };
+        return Transpiler.transpile(cls, Set.of(cls.name()), noSchema, Set.of()).source();
     }
 
     @Test

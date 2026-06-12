@@ -189,6 +189,14 @@ final class ExprTyper {
                 return "Boolean";
             }
         }
+        // builtin collection methods on a PARAMETERIZED List/Set/Map: resolve the result from the
+        // target's generic args (map.get(k) -> V, list.get(i) -> T, m.values() -> List<V>, ...).
+        // This is the big real-world win: `someMap.get(id).Field__c` / `list.get(0).method()`
+        // now type their result so the sObject field/method hop routes correctly.
+        String collResult = typeOfCollectionMethod(target, mc.name());
+        if (collResult != null) {
+            return collResult;
+        }
         // user-class method via the member type index (return type), keyed by the target's
         // class — or the current class for a bare/this-rooted call.
         String owner = base(target);
@@ -196,6 +204,79 @@ final class ExprTyper {
             owner = currentClassOf();
         }
         return memberType(owner, mc.name());
+    }
+
+    // Apex builtin collection methods are case-insensitive, like the rest of Apex. Grouped by the
+    // result they produce so the lookup stays a single case-insensitive membership test per group.
+    private static final Set<String> SIZE_METHODS = lower("size");
+    private static final Set<String> BOOL_METHODS = lower("isEmpty", "contains", "containsKey");
+    // get/remove on a List return the element T; on a Map return the value V (handled by caller).
+    private static final Set<String> ELEMENT_METHODS = lower("get", "remove");
+    private static final Set<String> CLONE_METHODS = lower("clone", "deepClone");
+
+    private static Set<String> lower(String... names) {
+        Set<String> s = new java.util.HashSet<>();
+        for (String n : names) {
+            s.add(n.toLowerCase(Locale.ROOT));
+        }
+        return s;
+    }
+
+    // The Apex result type of a builtin collection method invoked on `target` (the target's full
+    // type text, e.g. "Map<Id,Account>"), or null when not a known collection method on a
+    // parameterized collection. CONSERVATIVE: a raw List/Map (no generics, or an Object generic
+    // we can't stand behind) yields null so emission falls through unchanged. Method names match
+    // case-insensitively (Apex). Only types what the runtime List/Set/Map classes actually return.
+    private String typeOfCollectionMethod(String target, String name) {
+        if (target == null) {
+            return null;
+        }
+        String b = base(target);
+        boolean isMap = "Map".equalsIgnoreCase(b);
+        boolean isList = "List".equalsIgnoreCase(b);
+        boolean isSet = "Set".equalsIgnoreCase(b);
+        if (!isMap && !isList && !isSet) {
+            return null;
+        }
+        java.util.List<String> args = genericArgs(target);
+        if (args.isEmpty()) {
+            return null; // raw List/Map -> conservative null (no new typing)
+        }
+        String m = name.toLowerCase(Locale.ROOT);
+        // shared across all three collections (and exact in the runtime: HashMap/ArrayList/HashSet)
+        if (SIZE_METHODS.contains(m)) {
+            return "Integer";
+        }
+        if (BOOL_METHODS.contains(m)) {
+            return "Boolean";
+        }
+        if (CLONE_METHODS.contains(m)) {
+            return target; // clone()/deepClone() keep the same collection type
+        }
+        if (isMap) {
+            String k = args.get(0).trim();
+            String v = args.get(args.size() - 1).trim();
+            // Map.get/remove -> V (runtime HashMap.get/remove both return V).
+            // Map.put returns the prior V (runtime extends HashMap, whose put returns V — Apex's
+            // own put is void, but we type only what the runtime actually returns).
+            if (ELEMENT_METHODS.contains(m) || "put".equals(m)) {
+                return v;
+            }
+            if ("values".equals(m)) {
+                return "List<" + v + ">"; // runtime Map.values() -> a List view, typed by V
+            }
+            if ("keyset".equals(m)) {
+                return "Set<" + k + ">";
+            }
+            return null;
+        }
+        // List/Set share an element type T (the single generic arg)
+        String t = args.get(0).trim();
+        if (isList && ELEMENT_METHODS.contains(m)) {
+            // List.get(i) / List.remove(i) -> the removed/returned element T
+            return t;
+        }
+        return null;
     }
 
     private String typeOfBinary(Binary b) {
@@ -355,17 +436,25 @@ final class ExprTyper {
     String currentClass;
 
     private static String elementType(String type) {
+        // List<T> -> T ; Map<K,V> -> V (the value, like Index get on a Map): the LAST generic arg.
+        java.util.List<String> args = genericArgs(type);
+        return args.isEmpty() ? null : args.get(args.size() - 1).trim();
+    }
+
+    // The top-level generic arguments of a parameterized type, depth-aware (so Map<Id,List<Account>>
+    // splits into ["Id", "List<Account>"], not on the inner comma). Empty for a raw/non-generic type.
+    // One source of truth for both the value extractor (elementType) and the Map-key/value reader.
+    private static java.util.List<String> genericArgs(String type) {
+        java.util.List<String> parts = new java.util.ArrayList<>();
         if (type == null) {
-            return null;
+            return parts;
         }
         int lt = type.indexOf('<');
         if (lt < 0) {
-            return null;
+            return parts;
         }
-        // List<T> -> T ; Map<K,V> -> V (the value, like Index get on a Map)
         String inner = type.substring(lt + 1, type.lastIndexOf('>'));
         int depth = 0, last = 0;
-        java.util.List<String> parts = new java.util.ArrayList<>();
         for (int i = 0; i < inner.length(); i++) {
             char c = inner.charAt(i);
             if (c == '<') depth++;
@@ -376,7 +465,7 @@ final class ExprTyper {
             }
         }
         parts.add(inner.substring(last));
-        return parts.get(parts.size() - 1).trim();
+        return parts;
     }
 
     private static String base(String type) {

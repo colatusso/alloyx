@@ -238,6 +238,17 @@ final class Transpiler {
                 String ft = schema.fieldType(parent, p.name());
                 yield ft != null && !SCALARS.contains(ft) ? ft : null; // a relationship field
             }
+            // collection-method / index results (map.get(id).Field, list.get(0).Field,
+            // m.values().get(0).Field): the typer now resolves these from the collection's
+            // generics, so an sObject element routes its field hop through the typed getter.
+            case MethodCall mc -> {
+                String t = typer.typeOf(mc);
+                yield t != null && isSObjectName(base(t)) ? base(t) : null;
+            }
+            case Index ix -> {
+                String t = typer.typeOf(ix);
+                yield t != null && isSObjectName(base(t)) ? base(t) : null;
+            }
             default -> null;
         };
     }
@@ -1399,9 +1410,12 @@ final class Transpiler {
         String base = (lt >= 0 ? t.substring(0, lt) : t).replace("[]", "");
         String canon = BUILTINS.get(base.toLowerCase());
         if (canon != null) base = canon; // case-fold built-in type names (decimal -> Decimal)
-        // ConnectApi is enormous and fully org-coupled: any ConnectApi.* type degrades to Object
-        // for type-checking (see runtime ConnectApi for the rationale).
-        if (base.equals("ConnectApi") || base.startsWith("ConnectApi.")) return "Object";
+        // ConnectApi is enormous and fully org-coupled: no surface is modeled. A ConnectApi.* TYPE
+        // (a VARIABLE's declared type) falls through to the dynamic SObject below — member reads/
+        // writes on it then route through the untyped .get()/.put() path (Object in/out, compiles),
+        // exactly the pre-ConnectApi-stub behavior for an unknown dotted type. A STATIC chain rooted
+        // at the bare ConnectApi namespace (ConnectApi.Svc.call(...)) is still degraded to
+        // ConnectApi.unsupported(...) in emitProp/emitMethodCall — a static can't be an SObject value.
         // ApexPages nested types (Severity/Message) stay qualified onto the runtime ApexPages.
         if (base.startsWith("ApexPages.") && APEXPAGES_TYPES.contains(base.substring("ApexPages.".length())))
             return base;
