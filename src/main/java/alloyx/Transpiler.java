@@ -55,6 +55,16 @@ final class Transpiler {
         "import alloyx.runtime.Http;",
         "import alloyx.runtime.HttpRequest;",
         "import alloyx.runtime.HttpResponse;",
+        "import alloyx.runtime.XmlStreamWriter;",
+        "import alloyx.runtime.Messaging;",
+        "import alloyx.runtime.RestRequest;",
+        "import alloyx.runtime.RestResponse;",
+        "import alloyx.runtime.RestContext;",
+        "import alloyx.runtime.JSONGenerator;",
+        "import alloyx.runtime.PicklistEntry;",
+        "import alloyx.runtime.RecordTypeInfo;",
+        "import alloyx.runtime.ChildRelationship;",
+        "import alloyx.runtime.DescribeFieldResult;",
         "import alloyx.runtime.Blob;",
         "import alloyx.runtime.EncodingUtil;",
         "import alloyx.runtime.Trigger;",
@@ -103,7 +113,12 @@ final class Transpiler {
         "Http", "HttpRequest", "HttpResponse", "Blob", "EncodingUtil", "Trigger", "Test", "Assert",
         "ApexPages", "PageReference", "AggregateResult",
         "Schedulable", "SchedulableContext", "Queueable", "QueueableContext",
-        "Comparable", "Iterable", "Iterator");
+        "Comparable", "Iterable", "Iterator",
+        // RC3 runtime stubs: local-behaving (XmlStreamWriter builds XML, JSONGenerator builds JSON,
+        // Rest* carry request/response data, Messaging.* compose email), or describe tokens whose
+        // org-only members degrade (PicklistEntry/RecordTypeInfo/ChildRelationship/DescribeFieldResult).
+        "XmlStreamWriter", "JSONGenerator", "RestRequest", "RestResponse", "RestContext",
+        "PicklistEntry", "RecordTypeInfo", "ChildRelationship", "DescribeFieldResult");
     // Database namespace types: nested classes/interfaces on the runtime Database, kept qualified.
     // Batchable<T> + its context/locator + the Stateful/AllowsCallouts/RaisesPlatformEvents markers
     // are real Apex interfaces, so `implements Database.Batchable<sObject>` maps to a real Java
@@ -121,6 +136,11 @@ final class Transpiler {
     // ApexPages namespace nested types: nested classes/enum on the runtime ApexPages, kept qualified
     private static final Set<String> APEXPAGES_TYPES =
         Set.of("Severity", "Message", "StandardController", "StandardSetController");
+    // Messaging namespace nested types: nested classes on the runtime Messaging, kept qualified
+    // (mirrors DATABASE_TYPES). `Messaging.SingleEmailMessage`/`EmailFileAttachment` carry email
+    // data locally; the send results mirror the Database DML-result inspection-degrades shape.
+    private static final Set<String> MESSAGING_TYPES =
+        Set.of("SingleEmailMessage", "EmailFileAttachment", "SendEmailResult", "SendEmailError");
     // Apex is case-insensitive, so HTTPRequest == HttpRequest and blob == Blob; map a lowercased
     // native type name back to its canonical runtime class.
     private static final java.util.Map<String, String> RUNTIME_CANON = lowerIndex(RUNTIME_TYPES);
@@ -148,6 +168,9 @@ final class Transpiler {
                 alloyx.runtime.ApexPages.class, alloyx.runtime.Schema.class, alloyx.runtime.Label.class,
                 alloyx.runtime.EncodingUtil.class, alloyx.runtime.Blob.class, alloyx.runtime.Http.class,
                 alloyx.runtime.Trigger.class, alloyx.runtime.PageReference.class,
+                // RC3: Messaging.sendEmail(...) statics + RestContext.request/response static holders
+                // root here so a bare-namespace call/access is recognized (not a field/SObject).
+                alloyx.runtime.Messaging.class, alloyx.runtime.RestContext.class,
                 // Strings backs the Apex `String` class's STATICS (String.valueOf/join/isBlank...): the
                 // String-static router emits `Strings.<m>`, so its method names must fold here too
                 // (`String.valueof(x)` -> `Strings.valueOf(x)`), like every other platform class.
@@ -282,6 +305,10 @@ final class Transpiler {
         }
         for (String k : BUILTINS.keySet()) s.add(k); // already lowercase
         for (String v : BUILTINS.values()) s.add(v.toLowerCase(java.util.Locale.ROOT));
+        // platform namespace roots that aren't scalars/runtime types (Messaging, RestContext, ...):
+        // their lowercased simple names so a bare `Messaging.sendEmail(...)` root is a KNOWN type,
+        // never mistaken for an inherited field. Keys are already lowercase.
+        s.addAll(PLATFORM_CLASSES.keySet());
         return java.util.Set.copyOf(s);
     }
 
@@ -2512,6 +2539,10 @@ final class Transpiler {
         // Database.Batchable<sObject> keeps its generic so it implements Batchable<T> faithfully.
         if (base.startsWith("Database.") && DATABASE_TYPES.contains(base.substring("Database.".length())))
             return base + runtimeGenerics(base.substring("Database.".length()), lt, t);
+        // Messaging.SingleEmailMessage / Messaging.EmailFileAttachment stay qualified (nested classes
+        // on the runtime Messaging), mirroring the Database.* mechanism above.
+        if (base.startsWith("Messaging.") && MESSAGING_TYPES.contains(base.substring("Messaging.".length())))
+            return base;
         if (SCHEMA_TYPES.contains(base)) return base; // Schema.SObjectType -> runtime SObjectType
         // native System types, case-insensitive (Apex): HTTPRequest -> HttpRequest, blob -> Blob.
         // Iterable<T>/Iterator<T> keep their generic; the other runtime types carry none.

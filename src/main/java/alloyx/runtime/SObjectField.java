@@ -22,9 +22,13 @@ public final class SObjectField {
         this.fieldName = fieldName;
     }
 
-    /** Apex {@code getDescribe()}: field-level describe. Org-coupled; degrades when not local. */
-    public Object getDescribe() {
-        throw Unsupported.notLocal("SObjectField.getDescribe() for " + objectName + "." + fieldName);
+    /**
+     * Apex {@code getDescribe()}: field-level describe. The name + Apex type answer from the synced
+     * schema (see {@link DescribeFieldResult}); org-only metadata (label, picklist values, CRUD)
+     * degrades clearly there.
+     */
+    public DescribeFieldResult getDescribe() {
+        return new DescribeFieldResult(objectName, fieldName);
     }
 
     public String getName() {

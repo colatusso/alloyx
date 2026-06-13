@@ -42,7 +42,11 @@ final class Workspace {
         "Safe", "Exception", "Iterable", "Iterator", "Assert",
         // platform interfaces backed by runtime types (Schedulable/Queueable + their contexts,
         // Comparable): never describe to an sObject, so don't waste a describe call on them.
-        "Schedulable", "SchedulableContext", "Queueable", "QueueableContext", "Comparable");
+        "Schedulable", "SchedulableContext", "Queueable", "QueueableContext", "Comparable",
+        // RC3 runtime stubs (XmlStreamWriter/Messaging/Rest*/JSONGenerator + describe tokens):
+        // backed by runtime classes, never sObjects.
+        "XmlStreamWriter", "Messaging", "RestRequest", "RestResponse", "RestContext", "JSONGenerator",
+        "PicklistEntry", "RecordTypeInfo", "ChildRelationship", "DescribeFieldResult");
 
     record Compiled(ClassLoader loader, List<ClassDecl> classes) {
         Class<?> load(String name) throws ClassNotFoundException {

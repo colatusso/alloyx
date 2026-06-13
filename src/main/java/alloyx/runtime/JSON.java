@@ -198,4 +198,17 @@ public final class JSON {
         }
         return new Decimal(text);
     }
+
+    // ------------------------------------------------------------------
+    // Streaming generation
+    // ------------------------------------------------------------------
+
+    /**
+     * Apex {@code JSON.createGenerator(Boolean pretty)}: a streaming JSON writer. Pure
+     * string-building (no org dependency), so it runs locally and {@link JSONGenerator#getAsString()}
+     * returns the document written so far.
+     */
+    public static JSONGenerator createGenerator(Boolean pretty) {
+        return new JSONGenerator(pretty != null && pretty);
+    }
 }
