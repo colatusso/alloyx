@@ -137,6 +137,14 @@ final class SObjectScan {
                 walkBody(g.body(), out);
             }
             case Group grp -> walkBody(grp.stmts(), out);
+            case SwitchStmt sw -> {
+                walkExpr(sw.subject(), out);
+                for (WhenCase c : sw.cases()) {
+                    for (Expr v : c.values()) walkExpr(v, out);
+                    walkBody(c.body(), out);
+                }
+                walkBody(sw.elseBody(), out);
+            }
         }
     }
 

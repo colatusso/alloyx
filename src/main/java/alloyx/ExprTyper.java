@@ -334,8 +334,15 @@ final class ExprTyper {
         String op = b.op();
         if (op.equals("&&") || op.equals("||")
             || op.equals("==") || op.equals("!=")
+            || op.equals("===") || op.equals("!==")
             || op.equals("<") || op.equals(">") || op.equals("<=") || op.equals(">=")) {
             return "Boolean";
+        }
+        // a ?? b (null-coalescing): the result is the left operand's type (the value when present);
+        // fall back to the right's type when the left is unknown (e.g. a bare null-typed expr).
+        if (op.equals("??")) {
+            String lt = typeOf(b.left());
+            return lt != null ? lt : typeOf(b.right());
         }
         if (op.equals("+") && (isString(b.left()) || isString(b.right()))) {
             return "String"; // either side String -> concatenation

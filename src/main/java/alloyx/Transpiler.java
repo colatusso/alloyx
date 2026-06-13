@@ -321,6 +321,9 @@ final class Transpiler {
     // monotonic id for the synthetic lambda parameter that carries an evaluated-once safe-nav
     // target (a?.b -> Safe.nav(a, __sn0 -> __sn0.b)); a counter keeps nested chains' params distinct.
     private int safeNavId = 0;
+    // monotonic id for the synthetic temp a `switch on` lowers its subject into (evaluated once),
+    // so nested switches don't reuse the same temp name.
+    private int switchId = 0;
     // inner (nested) class names — both simple (Inner) and qualified (Outer.Inner) —
     // so references resolve as a user type, never the fallback dynamic SObject
     private final Set<String> innerTypes = new java.util.HashSet<>();
@@ -1108,6 +1111,12 @@ final class Transpiler {
                 java.util.Map<String, String> saved = new java.util.HashMap<>(locals);
                 try {
                     if (f.init() instanceof VarDecl iv) locals.put(iv.name(), qualifyInnerType(iv.type()));
+                    // multi-declarator init (for (Integer i = 0, len = n; ...)): block-scope EVERY name
+                    else if (f.init() instanceof Group g) {
+                        for (Stmt st : g.stmts()) {
+                            if (st instanceof VarDecl gv) locals.put(gv.name(), qualifyInnerType(gv.type()));
+                        }
+                    }
                     sb.append(indent).append("for (")
                       .append(f.init() == null ? "" : emitForClause(f.init())).append("; ")
                       .append(f.cond() == null ? "" : emitExpr(f.cond())).append("; ")
@@ -1133,6 +1142,7 @@ final class Transpiler {
                 scopedBlock(g.body(), indent + "    ", sb);
                 sb.append(indent).append("}\n");
             }
+            case SwitchStmt sw -> emitSwitch(sw, indent, sb);
             case Try tr -> {
                 sb.append(indent).append("try {\n");
                 scopedBlock(tr.body(), indent + "    ", sb); // try body is its own scope
@@ -1184,6 +1194,48 @@ final class Transpiler {
         }
     }
 
+    // Apex `switch on s { when a,b {..} when else {..} }` -> a null-safe if/else-if chain on a temp.
+    // Java's own `switch` is avoided on purpose: it can't match `null` (Apex `when null` is legal) and
+    // its String/enum value semantics differ. The subject is evaluated ONCE into a `var` temp, each
+    // arm tests it with java.util.Objects.equals (null-safe, so a null subject / `when null` both
+    // work), and the `when else` arm becomes the trailing `else`. Each body is its own block scope.
+    private void emitSwitch(SwitchStmt sw, String indent, StringBuilder sb) {
+        String temp = "__sw" + switchId++;
+        // bind the temp's type so the arm bodies type-check against it the same as any local
+        String subjectType = typer.typeOf(sw.subject());
+        java.util.Map<String, String> saved = new java.util.HashMap<>(locals);
+        try {
+            locals.put(temp, subjectType);
+            sb.append(indent).append("{\n");
+            String inner = indent + "    ";
+            sb.append(inner).append("var ").append(temp).append(" = ")
+              .append(emitExpr(sw.subject())).append(";\n");
+            boolean first = true;
+            for (WhenCase c : sw.cases()) {
+                sb.append(inner);
+                sb.append(first ? "if (" : "else if (");
+                first = false;
+                java.util.List<String> tests = new java.util.ArrayList<>();
+                for (Expr v : c.values()) {
+                    tests.add("java.util.Objects.equals(" + temp + ", " + emitExpr(v) + ")");
+                }
+                sb.append(String.join(" || ", tests)).append(") {\n");
+                scopedBlock(c.body(), inner + "    ", sb);
+                sb.append(inner).append("}\n");
+            }
+            if (!sw.elseBody().isEmpty()) {
+                // a `when else` with no preceding `when` arm becomes a bare block (no `if` to chain).
+                sb.append(inner).append(first ? "{\n" : "else {\n");
+                scopedBlock(sw.elseBody(), inner + "    ", sb);
+                sb.append(inner).append("}\n");
+            }
+            sb.append(indent).append("}\n");
+        } finally {
+            locals.clear();
+            locals.putAll(saved);
+        }
+    }
+
     // a classic-for init/update clause rendered inline (no indent, no ';')
     private String emitForClause(Stmt s) {
         return switch (s) {
@@ -1194,6 +1246,20 @@ final class Transpiler {
             }
             case Assign a -> emitExpr(a.target()) + " = " + emitExpr(a.value());
             case ExprStmt e -> emitExpr(e.expr());
+            // multi-declarator for-init: for (Integer i = 0, len = items.size(); ...). Java permits
+            // a single compound declaration only with an EXPLICIT type (not `var`), so emit the
+            // mapped boxed type once followed by `name [= init]` for each declarator.
+            case Group g -> {
+                StringBuilder sb = new StringBuilder();
+                for (int k = 0; k < g.stmts().size(); k++) {
+                    VarDecl v = (VarDecl) g.stmts().get(k);
+                    if (k == 0) sb.append(mapType(v.type())).append(' ');
+                    else sb.append(", ");
+                    sb.append(v.name());
+                    if (v.init() != null) sb.append(" = ").append(emitExpr(v.init()));
+                }
+                yield sb.toString();
+            }
             default -> throw new IllegalStateException("unsupported for-clause: " + s);
         };
     }
@@ -1671,6 +1737,14 @@ final class Transpiler {
             case Throw t -> collectReassigned(t.value(), out);
             case GuardedBlock g -> collectReassigned(g.body(), out);
             case Group g -> collectReassigned(g.stmts(), out);
+            case SwitchStmt sw -> {
+                collectReassigned(sw.subject(), out);
+                for (WhenCase c : sw.cases()) {
+                    for (Expr v : c.values()) collectReassigned(v, out);
+                    collectReassigned(c.body(), out);
+                }
+                collectReassigned(sw.elseBody(), out);
+            }
         }
     }
 
@@ -1735,6 +1809,10 @@ final class Transpiler {
             }
             case GuardedBlock g -> collectDeclaredLocals(g.body(), out);
             case Group g -> collectDeclaredLocals(g.stmts(), out);
+            case SwitchStmt sw -> {
+                for (WhenCase c : sw.cases()) collectDeclaredLocals(c.body(), out);
+                collectDeclaredLocals(sw.elseBody(), out);
+            }
             default -> { /* Assign/ExprStmt/Return/Dml/Throw declare no new name */ }
         }
     }
@@ -2052,6 +2130,13 @@ final class Transpiler {
     private static final Set<String> RELATIONAL = Set.of("<", ">", "<=", ">=");
 
     private String emitBinary(Binary b) {
+        // Apex ?? (null-coalescing): a ?? b -> Safe.nvl(a, b). NOTE the semantic tradeoff —
+        // real Apex evaluates b ONLY when a is null; Safe.nvl evaluates both eagerly (the lambda
+        // alternative would reintroduce the effectively-final capture problem safe-nav solved).
+        // Documented on Safe.nvl. Emitted BEFORE the Decimal-arith routing: ?? isn't arithmetic.
+        if (b.op().equals("??")) {
+            return "Safe.nvl(" + emitExpr(b.left()) + ", " + emitExpr(b.right()) + ")";
+        }
         // Apex Decimal arithmetic -> method calls (BigDecimal has no +/-/*// operators).
         // Guard: if either side is a String, '+' is concatenation, not addition.
         if (ARITH.contains(b.op()) && !isString(b.left()) && !isString(b.right())
@@ -2080,6 +2165,10 @@ final class Transpiler {
             // Apex == / != are value equality (Java == is reference for objects)
             case "==" -> "java.util.Objects.equals(" + l + ", " + r + ")";
             case "!=" -> "!java.util.Objects.equals(" + l + ", " + r + ")";
+            // Apex === / !== are IDENTITY (reference) comparisons: emit Java's reference == / !=
+            // directly, BYPASSING the Objects.equals value helper above.
+            case "===" -> "(" + l + " == " + r + ")";
+            case "!==" -> "(" + l + " != " + r + ")";
             case "&&" -> "(" + l + " && " + r + ")";
             case "||" -> "(" + l + " || " + r + ")";
             default -> "(" + l + " " + b.op() + " " + r + ")";

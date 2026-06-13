@@ -27,4 +27,18 @@ public final class Safe {
             action.accept(target);
         }
     }
+
+    /**
+     * Apex {@code a ?? b} (null-coalescing): the left value when non-null, else the fallback.
+     *
+     * <p>SEMANTIC TRADEOFF — real Apex evaluates {@code b} ONLY when {@code a} is null
+     * (short-circuit). This helper evaluates {@code b} EAGERLY because both operands are
+     * already-computed Java arguments. The lazy lambda alternative ({@code Supplier<T>}) would
+     * reintroduce the effectively-final capture restriction the safe-navigation work removed, so
+     * eager evaluation is the deliberate choice. Side-effect-free fallbacks (the overwhelming
+     * common case: a literal, a field read) are unaffected.
+     */
+    public static <T> T nvl(T value, T fallback) {
+        return value != null ? value : fallback;
+    }
 }

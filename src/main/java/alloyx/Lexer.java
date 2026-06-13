@@ -27,7 +27,11 @@ final class Lexer {
         // (which would leave the inner text lexed as a number/identifier)
         "(?<DQUOTE>\")",
         "(?<IDENT>[A-Za-z_]\\w*)",
-        "(?<OP>=>|==|!=|<=|>=|&&|\\|\\||\\+\\+|--|\\+=|-=|\\*=|/=|[-+*/=<>!{}()\\[\\];,.@?:&|^~])"
+        // Multi-char operators are listed LONGEST-FIRST so the regex alternation can't
+        // tokenize a prefix and leave a stray tail: === before ==, !== before !=, ?? before
+        // ?/:. <> is Apex's legacy inequality (== !=); Apex has no diamond <> generics, so a
+        // standalone <> is always the operator (a real generic always has a type between < >).
+        "(?<OP>===|!==|=>|==|!=|<>|<=|>=|&&|\\|\\||\\?\\?|\\+\\+|--|\\+=|-=|\\*=|/=|[-+*/=<>!{}()\\[\\];,.@?:&|^~])"
     ), Pattern.DOTALL);
 
     static List<Token> tokenize(String src) {

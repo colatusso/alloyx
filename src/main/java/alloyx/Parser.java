@@ -388,6 +388,7 @@ final class Parser {
         if (kw.equals("if")) return parseIf();
         if (kw.equals("while")) return parseWhile();
         if (kw.equals("for")) return parseFor();
+        if (kw.equals("switch")) return parseSwitch();
         if (kw.equals("try")) return parseTry();
         if (kw.equals("throw")) {
             advance();
@@ -432,7 +433,8 @@ final class Parser {
 
     private Stmt tryParseLocalDecl() {
         int save = i;
-        accept("final"); // optional local modifier, no Java equivalent needed
+        // optional local modifiers in any order (final / transient): no Java equivalent, dropped
+        while (accept("final") || accept("transient")) { /* skip */ }
         String type = consumeType();
         if (type != null && isIdent()) {
             String name = advance().value();
@@ -515,12 +517,25 @@ final class Parser {
     // one init/update clause of a classic for, parsed WITHOUT a trailing ';'
     private Stmt parseForClause() {
         int save = i;
-        accept("final");
+        while (accept("final") || accept("transient")) { /* skip local modifiers */ }
         String type = consumeType();
         if (type != null && isIdent()) {
             String name = advance().value();
             Expr init = accept("=") ? parseExpr() : null;
-            return new VarDecl(type, name, init);
+            // Apex allows several declarators in the for-init: for (Integer i = 0, len = n; ...)
+            // — collect them into a Group, the same multi-declaration node a plain statement uses,
+            // so all names get block-scoped and emitted (see emitForClause / For scope binding).
+            if (!at(",")) {
+                return new VarDecl(type, name, init);
+            }
+            List<Stmt> decls = new ArrayList<>();
+            decls.add(new VarDecl(type, name, init));
+            while (accept(",")) {
+                String n = advance().value(); // shares the leading type
+                Expr ini = accept("=") ? parseExpr() : null;
+                decls.add(new VarDecl(type, n, ini));
+            }
+            return new Group(decls);
         }
         i = save;
         Expr lvalue = parseExpr();
@@ -540,9 +555,60 @@ final class Parser {
         return new ExprStmt(lvalue);
     }
 
+    // Apex `switch on <subject> { when <vals> { ... } ... when else { ... } }`. `on`/`when`/`else`
+    // are CONTEXTUAL keywords (plain IDENTs here). Case values are literal lists (Integer/String)
+    // and trivial single idents (enum constants); a type-pattern `when Account a` is NOT in scope —
+    // it raises a clear error rather than being half-parsed. `when null` is allowed (a value).
+    private Stmt parseSwitch() {
+        expect("switch");
+        expect("on");
+        Expr subject = parseExpr();
+        expect("{");
+        List<WhenCase> cases = new ArrayList<>();
+        List<Stmt> elseBody = new ArrayList<>();
+        while (at("when")) {
+            advance(); // 'when'
+            if (at("else")) {
+                advance();
+                elseBody = parseBlock();
+                continue;
+            }
+            List<Expr> values = new ArrayList<>();
+            values.add(parseWhenValue());
+            while (accept(",")) values.add(parseWhenValue());
+            cases.add(new WhenCase(values, parseBlock()));
+        }
+        expect("}");
+        return new SwitchStmt(subject, cases, elseBody);
+    }
+
+    // One `when` match value: a literal (number/string/true/false/null) or a single bare ident
+    // (an enum constant). A TYPE-pattern `when Account a` (two idents before the block) is rejected
+    // with a clear error — the corpus never uses it, so half-implementing it would be worse.
+    private Expr parseWhenValue() {
+        if (isIdent() && peek(1).kind().equals("IDENT")) {
+            Token t = peek();
+            throw new RuntimeException(
+                "switch type-pattern (when <Type> <name>) is not supported (" + lineOf(t) + ")");
+        }
+        return parseExpr();
+    }
+
     // --- expressions (precedence low -> high)
     private Expr parseExpr() {
-        return parseTernary();
+        return parseNullCoalesce();
+    }
+
+    // Apex ?? (null-coalescing): the lowest-precedence binary, RIGHT-associative, so
+    // `a ?? b ?? c` parses as `a ?? (b ?? c)`. Modeled as a Binary("??", ...) the typer/
+    // emitter recognize. The recursive right operand (parseNullCoalesce) gives right-assoc.
+    private Expr parseNullCoalesce() {
+        Expr left = parseTernary();
+        if (at("??")) {
+            advance();
+            return new Binary("??", left, parseNullCoalesce());
+        }
+        return left;
     }
 
     private Expr parseTernary() {
@@ -602,8 +668,12 @@ final class Parser {
 
     private Expr parseEquality() {
         Expr left = parseComparison();
-        while (at("==") || at("!=")) {
+        // ==, != : value equality. ===, !== : Apex identity (reference) comparison — kept as a
+        // distinct Binary op so emission bypasses the Objects.equals value helper. <> is Apex's
+        // legacy inequality, an exact synonym of != (normalized here so emission needs no new case).
+        while (at("==") || at("!=") || at("===") || at("!==") || at("<>")) {
             String op = advance().value();
+            if (op.equals("<>")) op = "!=";
             left = new Binary(op, left, parseComparison());
         }
         return left;

@@ -51,7 +51,15 @@ record MethodDecl(String name, boolean isStatic, String returnType,
 }
 
 // --- statements
-sealed interface Stmt permits VarDecl, Assign, ExprStmt, Return, If, While, ForEach, For, Dml, Try, Throw, GuardedBlock, Group {}
+sealed interface Stmt permits VarDecl, Assign, ExprStmt, Return, If, While, ForEach, For, Dml, Try, Throw, GuardedBlock, Group, SwitchStmt {}
+
+// Apex `switch on <subject> { when v1, v2 { ... } ... when else { ... } }`.
+// Each WhenCase carries its match values (literals or trivial enum/ident exprs) and body;
+// `elseBody` is the `when else` arm (empty list when absent). Lowered to a null-safe if/else
+// chain in emission (no Java `switch`, which can't match null and has different value semantics).
+record SwitchStmt(Expr subject, List<WhenCase> cases, List<Stmt> elseBody) implements Stmt {}
+
+record WhenCase(List<Expr> values, List<Stmt> body) {}
 
 // several statements emitted inline, sharing the enclosing scope (no braces) —
 // e.g. a multi-variable declaration: Integer a = 1, b, c = 3;
