@@ -46,7 +46,8 @@ final class Workspace {
         // RC3 runtime stubs (XmlStreamWriter/Messaging/Rest*/JSONGenerator + describe tokens):
         // backed by runtime classes, never sObjects.
         "XmlStreamWriter", "Messaging", "RestRequest", "RestResponse", "RestContext", "JSONGenerator",
-        "PicklistEntry", "RecordTypeInfo", "ChildRelationship", "DescribeFieldResult");
+        "PicklistEntry", "RecordTypeInfo", "ChildRelationship", "DescribeFieldResult",
+        "Type", "Savepoint", "QueryLocatorIterator");
 
     record Compiled(ClassLoader loader, List<ClassDecl> classes) {
         Class<?> load(String name) throws ClassNotFoundException {

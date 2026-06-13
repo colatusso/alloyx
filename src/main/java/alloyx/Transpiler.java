@@ -118,14 +118,17 @@ final class Transpiler {
         // Rest* carry request/response data, Messaging.* compose email), or describe tokens whose
         // org-only members degrade (PicklistEntry/RecordTypeInfo/ChildRelationship/DescribeFieldResult).
         "XmlStreamWriter", "JSONGenerator", "RestRequest", "RestResponse", "RestContext",
-        "PicklistEntry", "RecordTypeInfo", "ChildRelationship", "DescribeFieldResult");
+        "PicklistEntry", "RecordTypeInfo", "ChildRelationship", "DescribeFieldResult",
+        // System.Type: already a static-call target via BUILTINS; registering it here lets a
+        // DECLARED `Type t = Type.forName(...)` map to the runtime class instead of SObject
+        "Type");
     // Database namespace types: nested classes/interfaces on the runtime Database, kept qualified.
     // Batchable<T> + its context/locator + the Stateful/AllowsCallouts/RaisesPlatformEvents markers
     // are real Apex interfaces, so `implements Database.Batchable<sObject>` maps to a real Java
     // interface (nested on Database) instead of collapsing to the dynamic SObject.
     private static final Set<String> DATABASE_TYPES =
         Set.of("SaveResult", "UpsertResult", "DeleteResult", "Error",
-            "Batchable", "BatchableContext", "QueryLocator",
+            "Batchable", "BatchableContext", "QueryLocator", "QueryLocatorIterator",
             "Stateful", "AllowsCallouts", "RaisesPlatformEvents",
             "Savepoint", "LeadConvert", "LeadConvertResult");
     // Recognized runtime/Database types that carry a generic parameter to PRESERVE (Batchable<T>,
@@ -421,14 +424,19 @@ final class Transpiler {
     private String sObjectTypeOf(Expr e) {
         return switch (e) {
             case Name n -> {
-                String t = ExprTyper.isThisRef(n.ident()) ? null : locals.get(n.ident());
-                if (t == null && !ExprTyper.isThisRef(n.ident()) && !typer.isKnownTypeName(n.ident())) {
+                // canonicalName first: Apex idents are case-insensitive, so `Account.Name` with a
+                // local `account` in scope is a VARIABLE read (vars win over types) — resolving the
+                // spelling here lets the typed-getter path fire instead of leaking the raw ident
+                // onto the generated class (where it would bind the static field token).
+                String ident = ExprTyper.isThisRef(n.ident()) ? n.ident() : canonicalName(n.ident());
+                String t = ExprTyper.isThisRef(ident) ? null : locals.get(ident);
+                if (t == null && !ExprTyper.isThisRef(ident) && !typer.isKnownTypeName(ident)) {
                     // an inherited field read without `this.`: not in locals (only the current
                     // body's own fields are) — resolve through the member index's extends walk.
                     // A bare ident that NAMES a type (the target of a static call) is NOT an
                     // inherited field, even when a superclass declares a field of the same name;
                     // skip the field walk so the static-call emission isn't mis-routed.
-                    t = memberType(typer.currentClass, n.ident());
+                    t = memberType(typer.currentClass, ident);
                 }
                 yield t != null && isSObjectName(base(t)) ? base(t) : null;
             }
@@ -2544,6 +2552,10 @@ final class Transpiler {
         if (base.startsWith("Messaging.") && MESSAGING_TYPES.contains(base.substring("Messaging.".length())))
             return base;
         if (SCHEMA_TYPES.contains(base)) return base; // Schema.SObjectType -> runtime SObjectType
+        // Apex lets System-namespace types whose runtime home is a Database nested type appear
+        // BARE: `Savepoint sp = Database.setSavepoint();` — qualify them to the nested class.
+        if (base.equalsIgnoreCase("Savepoint")) return "Database.Savepoint";
+        if (base.equalsIgnoreCase("QueryLocatorIterator")) return "Database.QueryLocatorIterator";
         // native System types, case-insensitive (Apex): HTTPRequest -> HttpRequest, blob -> Blob.
         // Iterable<T>/Iterator<T> keep their generic; the other runtime types carry none.
         String runtimeCanon = RUNTIME_CANON.get(base.toLowerCase(java.util.Locale.ROOT));

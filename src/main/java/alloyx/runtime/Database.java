@@ -379,9 +379,20 @@ public final class Database {
      * iterating one isn't modeled. It exists so start()'s declared return type resolves.
      */
     public interface QueryLocator {
-        default java.util.Iterator<SObject> iterator() {
+        default QueryLocatorIterator iterator() {
             throw Unsupported.notLocal("Database.QueryLocator iteration");
         }
+    }
+
+    /**
+     * Apex {@code Database.QueryLocatorIterator}: the cursor a QueryLocator hands out. Apex-shaped
+     * (Boolean hasNext, like the alloyx Iterator) so transpiled while-loops type-check; obtaining
+     * one already degrades not-local at {@link QueryLocator#iterator()}.
+     */
+    public interface QueryLocatorIterator {
+        Boolean hasNext();
+
+        SObject next();
     }
 
     /** Local has no query cursor; getQueryLocator is recognized but fails clearly if invoked. */

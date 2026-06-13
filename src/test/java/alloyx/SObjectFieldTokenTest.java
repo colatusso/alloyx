@@ -171,6 +171,28 @@ class SObjectFieldTokenTest {
     }
 
     @Test
+    void typeCasedAccessOnShadowingVariable_isAnInstanceRead() throws Exception {
+        // the inverse spelling of the shadow: the VARIABLE is lowercase (`item__c`) and the ACCESS
+        // is written with the TYPE's casing (`Item__c.Name__c`). Apex resolves idents
+        // case-insensitively and variables win over types, so this is an instance read. The trap:
+        // suppressing the token alone is not enough — a raw `Item__c.Name__c` passthrough still
+        // BINDS the generated class's static token through Java name resolution, so the target
+        // must re-type through the canonical local (corpus regression, batch v0.2.4 flip).
+        Path p = probe("ShadowTypeCased", """
+            public class ShadowTypeCased {
+                public static String go() {
+                    Item__c item__c = new Item__c();
+                    item__c.Name__c = 'inst';
+                    String got = Item__c.Name__c;
+                    return got;
+                }
+            }
+            """);
+        Class<?> c = Workspace.compile(List.of(p)).load("ShadowTypeCased");
+        assertEquals("inst", c.getMethod("go").invoke(null));
+    }
+
+    @Test
     void instanceFieldAccess_stillRoutesThroughGetter_noRegression() throws Exception {
         // a normal instance field read item.Name__c must STILL go through the typed getter, unchanged
         // by the static-token path (the token only fires for a bare TYPE-name target).
