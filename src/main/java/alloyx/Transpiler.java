@@ -1356,15 +1356,18 @@ final class Transpiler {
             case InstanceOf io -> "(" + emitExpr(io.expr()) + " instanceof " + mapType(io.type()) + ")";
             case ClassLit cl -> {
                 String b = cl.type();
-                int lt = b.indexOf('<');
                 // A typed-sObject `.class` token carries the row type so the runtime JSON.deserialize
                 // can materialize typed rows: `List<Item__c>.class` / `Item__c.class` both emit the
                 // generated row class `Item__c.class` (Java has no `List<X>.class`, and the element
-                // type is the useful signal). Non-sObject types keep their base `.class`.
+                // type is the useful signal). Every OTHER `.class` in Apex is a System.Type literal,
+                // NOT a java.lang.Class, so emit the runtime Type — it composes where a Type is
+                // expected (`new List<Type>{ Integer.class }`, `Test.setMock(Mock.class, ...)`),
+                // while runtime sinks that branch on `instanceof Class` (JSON.deserialize) treat a
+                // non-sObject token identically either way. The denoted type name is the identity.
                 String elem = base(firstGeneric(b));
                 yield isTyped(elem)
                     ? typedName(elem) + ".class"
-                    : mapType(lt >= 0 ? b.substring(0, lt) : b) + ".class";
+                    : "Type.forName(\"" + b + "\")";
             }
         };
     }

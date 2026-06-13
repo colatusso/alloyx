@@ -38,6 +38,20 @@ public final class Type {
         return name;
     }
 
+    // Apex compares type tokens by the type they denote: `Integer.class == Integer.class` is true,
+    // and a `List<Type>` equality (e.g. fflib_QualifiedMethod) compares the named types element-wise.
+    // Identity would break both, so equal by (case-insensitive) name — the API name IS the identity.
+    @Override
+    public boolean equals(Object other) {
+        return other instanceof Type t
+            && (name == null ? t.name == null : name.equalsIgnoreCase(t.name));
+    }
+
+    @Override
+    public int hashCode() {
+        return name == null ? 0 : name.toLowerCase(java.util.Locale.ROOT).hashCode();
+    }
+
     @Override
     public String toString() {
         return name;
