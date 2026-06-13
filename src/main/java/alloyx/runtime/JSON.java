@@ -104,12 +104,47 @@ public final class JSON {
 
     /**
      * Apex {@code JSON.deserialize(String, System.Type)}: typed deserialization.
-     * Typed binding needs reflection we skip in this version, so this is a
-     * best-effort delegation to {@link #deserializeUntyped(String)}; the
-     * {@code type} argument is accepted and ignored.
+     *
+     * <p>When {@code type} names an sObject row class (the transpiler passes the
+     * generated row class for {@code List<Item__c>.class} / {@code Item__c.class}),
+     * the untyped model is materialized into generic {@link SObject} rows — a JSON
+     * object becomes one {@code SObject} of its fields, a JSON array of objects a
+     * {@code List<SObject>}. The typed cast/{@code .many()} wrap at the call site then
+     * re-types those rows to the declared sObject. Any other (or absent) type token
+     * keeps the plain untyped model — a JSON object stays a {@code Map<String,Object>}.
      */
     public static Object deserialize(String json, Object type) {
-        return deserializeUntyped(json);
+        Object value = deserializeUntyped(json);
+        return isSObjectType(type) ? toSObjectModel(value) : value;
+    }
+
+    /** Whether the {@code .class} token denotes an sObject row class (a generated SObject subtype). */
+    private static boolean isSObjectType(Object type) {
+        return type instanceof Class<?> c && SObject.class.isAssignableFrom(c);
+    }
+
+    /**
+     * Materialize the untyped JSON model into sObject rows: a {@code Map<String,Object>} becomes one
+     * generic {@link SObject} carrying those fields; a {@code List} maps each element the same way;
+     * anything else (a scalar, null) passes through. Nested objects/lists are NOT recursively
+     * converted — only the row level matters for the typed cast that consumes this.
+     */
+    private static Object toSObjectModel(Object value) {
+        if (value instanceof List<?> list) {
+            List<Object> out = new List<>();
+            for (Object e : list) {
+                out.add(toSObjectModel(e));
+            }
+            return out;
+        }
+        if (value instanceof java.util.Map<?, ?> map) {
+            SObject row = new SObject("SObject");
+            for (java.util.Map.Entry<?, ?> e : map.entrySet()) {
+                row.put(String.valueOf(e.getKey()), e.getValue());
+            }
+            return row;
+        }
+        return value;
     }
 
     /** Recursively convert a Gson element into the Apex untyped value model. */

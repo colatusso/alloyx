@@ -947,7 +947,12 @@ final class Transpiler {
         }
         switch (s) {
             case VarDecl v -> {
-                locals.put(v.name(), qualifyInnerType(v.type()));
+                // The local isn't in Apex scope until AFTER its own declarator (Apex even rejects
+                // `Integer x = x + 1`), so bind the name into `locals` only AFTER the initializer is
+                // emitted. Binding it before let the case-insensitive locals lookup match a STATIC
+                // call target that shares the type's name (`CachedItems x = CachedItems.fromJson(...)`,
+                // where CachedItems degrades to SObject and falls to the typed else-branch), emitting
+                // a self-referencing initializer. See the post-emit locals.put below.
                 if (v.init() == null) {
                     // Apex locals default to null; emit it so Java's definite-assignment
                     // rule is satisfied too (everything maps to a boxed/reference type)
@@ -988,9 +993,22 @@ final class Transpiler {
                     sb.append(indent).append(mapType(v.type())).append(' ').append(v.name())
                       .append(" = ").append(coerceNumeric(v.type(), v.init())).append(";\n");
                 } else {
-                    sb.append(indent).append("var ").append(v.name())
-                      .append(" = ").append(emitExpr(v.init())).append(";\n");
+                    // Every Apex VarDecl carries a source-declared type (the parser never infers),
+                    // so emit the MAPPED declared type — never `var`. A declared type that can't be
+                    // loaded degrades to the dynamic SObject (mapType); when it does, the initializer
+                    // may emit as Object (a degraded static call, ConnectApi.unsupported(...)) which
+                    // javac won't narrow to SObject, so round-trip it through Object — preserving the
+                    // pre-`var` "it compiles" guarantee. A non-degraded declared type keeps the plain
+                    // assignment (the RHS is assignment-compatible in valid Apex; full type checking).
+                    String lt = mapType(v.type());
+                    String init = lt.equals("SObject")
+                        ? "(SObject)(Object) " + emitExpr(v.init())
+                        : emitExpr(v.init());
+                    sb.append(indent).append(lt).append(' ').append(v.name())
+                      .append(" = ").append(init).append(";\n");
                 }
+                // bind AFTER the initializer is emitted (see the comment at the top of this case)
+                locals.put(v.name(), qualifyInnerType(v.type()));
             }
             case Assign a -> {
                 if (a.target() instanceof Index ix) {
@@ -1304,7 +1322,14 @@ final class Transpiler {
             case ClassLit cl -> {
                 String b = cl.type();
                 int lt = b.indexOf('<');
-                yield mapType(lt >= 0 ? b.substring(0, lt) : b) + ".class"; // Java has no List<X>.class
+                // A typed-sObject `.class` token carries the row type so the runtime JSON.deserialize
+                // can materialize typed rows: `List<Item__c>.class` / `Item__c.class` both emit the
+                // generated row class `Item__c.class` (Java has no `List<X>.class`, and the element
+                // type is the useful signal). Non-sObject types keep their base `.class`.
+                String elem = base(firstGeneric(b));
+                yield isTyped(elem)
+                    ? typedName(elem) + ".class"
+                    : mapType(lt >= 0 ? b.substring(0, lt) : b) + ".class";
             }
         };
     }
@@ -1328,14 +1353,33 @@ final class Transpiler {
         if (narrow != null && isDecimal(c.expr())) {
             return "(" + emitExpr(c.expr()) + ")." + narrow + "()";
         }
-        // (List<Account>) queryResult: the query builder returns List<SObject>; re-type and
-        // wrap its rows into a real List<Account> (fixes both javac's invariance and the
-        // runtime element type, exactly like a direct SOQL bound to List<Account>)
+        // (List<Account>) src: re-type and wrap each row into a real List<Account> (fixes both
+        // javac's invariance and the runtime element type, exactly like a direct SOQL bound to
+        // List<Account>). The .many() wrapper takes a List<SObject>, so the SOURCE's static type
+        // decides how its argument is shaped:
+        //   - already List<SObject> (a SOQL result, a child-relationship read): pass it straight.
+        //   - anything else, typically Object (JSON.deserialize returns Object): down-cast to
+        //     List<SObject> via Object first, so many() accepts it. The runtime JSON.deserialize,
+        //     given the typed `.class` token, has already materialized the rows as generic SObjects.
         if (base(c.type()).equals("List")) {
             String elem = base(firstGeneric(c.type()));
             if (isTyped(elem)) {
-                return typedName(elem) + ".many(" + emitExpr(c.expr()) + ")"; // canonical class name
+                String src = iterableIsSObjectList(c.expr())
+                    ? emitExpr(c.expr())
+                    : "(List<SObject>)(Object) " + emitExpr(c.expr());
+                return typedName(elem) + ".many(" + src + ")"; // canonical class name
             }
+        }
+        // (Account) src cast to a single typed sObject where the SOURCE doesn't already type as an
+        // sObject — typically Object (a single-object JSON.deserialize, materialized into a generic
+        // SObject). Wrap it as the typed row: a plain `(Account)(Object) src` would CCE on a generic
+        // SObject at runtime. A List<SObject>-typed source takes one() (the first row). A source that
+        // ALREADY types as an sObject keeps the plain cast below (unchanged behavior).
+        if (isTyped(base(c.type())) && !isSObject(c.expr())) {
+            String typed = typedName(base(c.type()));
+            return iterableIsSObjectList(c.expr())
+                ? typed + ".one(" + emitExpr(c.expr()) + ")"
+                : "new " + typed + "((SObject)(Object) " + emitExpr(c.expr()) + ")";
         }
         String tt = mapType(c.type());
         // Java generics are invariant — a cast between parameterized collections
