@@ -65,7 +65,14 @@ let resolvedCli: string | undefined;
 /** The absolute path of a known-good install, if one exists on disk. */
 function cliResolvedAbsolute(): string | undefined {
   if (!resolvedCli) {
-    for (const dir of CLI_INSTALL_DIRS) {
+    // On Windows also scan PATH: the launcher (allx.bat) may live anywhere the
+    // installer or the user put it, and we want its absolute path to anchor the
+    // install layout (and to invoke it without a stale-PATH dependency).
+    const dirs =
+      isWindows && process.env.PATH
+        ? [...CLI_INSTALL_DIRS, ...process.env.PATH.split(path.delimiter)]
+        : CLI_INSTALL_DIRS;
+    for (const dir of dirs) {
       const candidate = path.join(dir, CLI_BIN);
       if (fs.existsSync(candidate)) {
         resolvedCli = candidate;
@@ -91,19 +98,64 @@ function cliPath(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Invocation. On Windows the launcher is a .bat, which Node's execFile/spawn
-// cannot run directly (CreateProcess does no PATHEXT/cmd resolution). We run it
-// THROUGH cmd.exe with an ARGUMENT ARRAY — never a shell string — so Node does
-// the argv escaping and there is no command line to inject into. `/d /s /c` is
-// exactly what Node itself uses under `shell:true` (no AutoRun, /c = run+exit).
-// On Unix it's a plain execFile/spawn of the resolved binary.
+// Invocation. On Unix it's a plain execFile/spawn of the resolved binary.
+//
+// On Windows the launcher is a Gradle .bat, and a .bat can only run through
+// cmd.exe — which RE-TOKENIZES the command line (%VAR% expansion and the
+// & | < > ( ) ^ metacharacters), the BatBadBut command-injection class. Our argv
+// carries user-influenced values (the open file's path, the alloyx.org setting a
+// workspace can define), so handing them to cmd.exe is unsafe however they're
+// quoted. Instead we BYPASS the .bat and invoke java.exe directly with the same
+// classpath + main class the .bat uses. java.exe is a real executable:
+// execFile/spawn pass argv straight through CreateProcess (no shell, no cmd), so
+// there is nothing to inject into — on any Node version.
 // ---------------------------------------------------------------------------
 
-/** The (file, argv) to launch the CLI with `args`, wrapping in cmd.exe on Windows. */
+/** The JDK launcher to run allx with: alloyx.javaHome / JAVA_HOME, else PATH. */
+function javaExe(): string {
+  const javaHome =
+    vscode.workspace.getConfiguration("alloyx").get<string>("javaHome", "") ||
+    process.env.JAVA_HOME ||
+    "";
+  const bin = isWindows ? "java.exe" : "java";
+  return javaHome ? path.join(javaHome, "bin", bin) : bin;
+}
+
+/**
+ * On Windows, the direct-JVM launch that bypasses the .bat (and cmd.exe). The
+ * install layout is <root>\bin\allx.bat alongside <root>\lib\*.jar, so we derive
+ * <root> from the resolved/configured launcher and run java with `<root>\lib\*`
+ * (a wildcard the JVM — not a shell — expands) and the main class. Returns
+ * undefined when no .bat anchors the layout (then the caller runs cliPath()).
+ */
+function winJavaLaunch(args: string[]): { file: string; argv: string[] } | undefined {
+  const configured = vscode.workspace.getConfiguration("alloyx").get<string>("cliPath", "allx");
+  const bat =
+    configured === "allx"
+      ? cliResolvedAbsolute()
+      : configured.toLowerCase().endsWith(".bat")
+        ? configured
+        : undefined;
+  if (!bat) {
+    return undefined;
+  }
+  const root = path.dirname(path.dirname(bat)); // <root>\bin\allx.bat -> <root>
+  const lib = path.join(root, "lib");
+  if (!fs.existsSync(lib)) {
+    return undefined;
+  }
+  return { file: javaExe(), argv: ["-classpath", path.join(lib, "*"), "alloyx.Cli", ...args] };
+}
+
+/** The (file, argv) to launch the CLI with `args`. */
 function cliLaunch(args: string[]): { file: string; argv: string[] } {
-  return isWindows
-    ? { file: "cmd.exe", argv: ["/d", "/s", "/c", cliPath(), ...args] }
-    : { file: cliPath(), argv: args };
+  if (isWindows) {
+    const viaJava = winJavaLaunch(args);
+    if (viaJava) {
+      return viaJava;
+    }
+  }
+  return { file: cliPath(), argv: args };
 }
 
 interface CliOpts {
@@ -144,6 +196,7 @@ const BREW_UPGRADE_CMD = "brew upgrade allx";
 const PS_INSTALL_CMD =
   "irm https://raw.githubusercontent.com/colatusso/alloyx/main/install.ps1 | iex";
 let cliMissingShown = false;
+let jdkMissingShown = false;
 
 // Lowest CLI version this extension is built against. Bumped at release time when
 // the extension starts to rely on a newer CLI feature/output. Warning-only.
@@ -200,27 +253,53 @@ function notifyCliMissing(): void {
     });
 }
 
-/** Whether the user is on the bare default cliPath (not a custom path/name). */
-function usingDefaultCli(): boolean {
-  return (
-    vscode.workspace.getConfiguration("alloyx").get<string>("cliPath", "allx") === "allx"
-  );
+/** One-per-session warning that the JDK (java) needed to run allx is missing. */
+function notifyJdkMissing(): void {
+  if (jdkMissingShown) {
+    return;
+  }
+  jdkMissingShown = true;
+  void vscode.window
+    .showWarningMessage(
+      "AlloyX found the allx CLI but no JDK to run it. Set alloyx.javaHome to your JDK 21 path.",
+      "Set java path"
+    )
+    .then((pick) => {
+      if (pick === "Set java path") {
+        void vscode.commands.executeCommand("workbench.action.openSettings", "alloyx.javaHome");
+      }
+    });
 }
 
-/** Whether this exec error means "the binary itself wasn't found". */
+/** Whether this exec error means "allx itself wasn't found" (vs the JDK). */
 function isCliMissing(err: unknown): boolean {
   const e = err as NodeJS.ErrnoException | null;
   if (!e) {
     return false;
   }
+  // ENOENT = the launched executable wasn't found. On Unix that's allx. On
+  // Windows we launch java.exe directly, so ENOENT means the JDK is missing
+  // UNLESS we also never resolved an allx install — then allx itself is absent
+  // (cliLaunch fell back to running the bare launcher name, which ENOENTs).
   if (e.code === "ENOENT") {
-    return true; // Unix, or a custom cliPath that doesn't exist
+    return isWindows ? !cliResolvedAbsolute() : true;
   }
-  // Windows runs the .bat through cmd.exe, so a missing launcher surfaces as a
-  // non-zero exit ("not recognized"), never ENOENT. When we're on the default
-  // cliPath and resolved no real install, a failed call means it isn't where we
-  // can find it (install.ps1 lands it in a dir we DO search, so this is rare).
-  return isWindows && usingDefaultCli() && !cliResolvedAbsolute();
+  return false;
+}
+
+/** A Windows ENOENT with allx resolved means java.exe — not allx — wasn't found. */
+function isJdkMissing(err: unknown): boolean {
+  const e = err as NodeJS.ErrnoException | null;
+  return isWindows && !!e && e.code === "ENOENT" && !!cliResolvedAbsolute();
+}
+
+/** Route a spawn error to the right one-time hint: missing allx vs missing JDK. */
+function maybeNotifyMissing(err: unknown): void {
+  if (isCliMissing(err)) {
+    notifyCliMissing();
+  } else if (isJdkMissing(err)) {
+    notifyJdkMissing();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -284,11 +363,12 @@ function checkCliVersion(): void {
     ["--version"],
     { timeout: 15000, env: execEnv() },
     (err, stdout, stderr) => {
-      if (isCliMissing(err)) {
-        return; // not installed: notifyCliMissing owns that case
+      const e = err as NodeJS.ErrnoException | null;
+      if (e && e.code === "ENOENT") {
+        return; // allx or the JDK is absent — a feature call reports it; not a version signal
       }
+      // success, or an old CLI predating --version (usage / non-zero exit / no semver)
       const found = parseSemver(`${stdout ?? ""}\n${stderr ?? ""}`);
-      // old CLI: non-zero exit / usage output / no semver at all -> outdated
       if (!found || compareVersions(found, MIN_CLI_VERSION) < 0) {
         notifyCliOutdated(found);
       }
@@ -319,7 +399,7 @@ function execEnv(): NodeJS.ProcessEnv {
   return {
     ...process.env,
     JAVA_HOME: javaHome,
-    PATH: `${javaHome}/bin:${process.env.PATH ?? ""}`,
+    PATH: `${path.join(javaHome, "bin")}${path.delimiter}${process.env.PATH ?? ""}`,
   };
 }
 
@@ -337,9 +417,7 @@ function getOutline(absFile: string): Promise<Outline | undefined> {
       { timeout: 15000, env: execEnv(), cwd: path.dirname(absFile) },
       (err, stdout) => {
         if (err) {
-          if (isCliMissing(err)) {
-            notifyCliMissing();
-          }
+          maybeNotifyMissing(err);
           resolve(undefined);
           return;
         }
@@ -403,9 +481,7 @@ function runSnippet(snippet: string, dir: string, label: string): void {
         output.append(stderr);
       }
       if (err && !stdout && !stderr) {
-        if (isCliMissing(err)) {
-          notifyCliMissing();
-        }
+        maybeNotifyMissing(err);
         output.appendLine(String(err));
       }
     }
@@ -530,9 +606,7 @@ async function syncSchema(): Promise<void> {
   child.stdout.on("data", (d) => output.append(d.toString()));
   child.stderr.on("data", (d) => output.append(d.toString()));
   child.on("error", (e) => {
-    if (isCliMissing(e)) {
-      notifyCliMissing();
-    }
+    maybeNotifyMissing(e);
     output.appendLine(String(e));
   });
   child.on("close", (code) =>
@@ -612,9 +686,7 @@ function checkSource(absFile: string, source: string): Promise<CheckDiag[]> {
       // cwd = the file's folder so the synced `.apexcache/schema` is found
       { timeout: 15000, maxBuffer: 8 * 1024 * 1024, env: execEnv(), cwd: path.dirname(absFile) },
       (err, stdout) => {
-        if (isCliMissing(err)) {
-          notifyCliMissing();
-        }
+        maybeNotifyMissing(err);
         try {
           resolve(JSON.parse(stdout.trim()) as CheckDiag[]);
         } catch {
