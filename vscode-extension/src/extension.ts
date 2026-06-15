@@ -2,7 +2,13 @@ import * as vscode from "vscode";
 import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
-import { execFile, spawn } from "child_process";
+import {
+  execFile,
+  spawn,
+  ChildProcess,
+  ChildProcessWithoutNullStreams,
+  ExecFileException,
+} from "child_process";
 
 // ---------------------------------------------------------------------------
 // Types mirroring the JSON emitted by `allx outline <file> --json`.
@@ -28,38 +34,102 @@ interface Outline {
   methods: OutlineMethod[];
 }
 
-// Where installers put allx. A GUI-launched VS Code on macOS doesn't inherit the
-// login shell's PATH (and Reload Window doesn't re-capture it), so a fresh
-// `brew install` is invisible to a bare PATH lookup until the app fully restarts.
-// When the setting is the bare default, resolve against these install dirs first.
-const CLI_INSTALL_DIRS = [
-  "/opt/homebrew/bin", // Homebrew, Apple Silicon
-  "/usr/local/bin", // Homebrew, Intel mac / common Linux prefix
-  path.join(os.homedir(), ".local", "bin"),
-];
+const isWindows = process.platform === "win32";
+
+// The launcher's filename. Windows ships a Gradle .bat; Unix a bare script.
+const CLI_BIN = isWindows ? "allx.bat" : "allx";
+
+// Where installers put allx. A GUI-launched editor doesn't inherit the login
+// shell's PATH (and Reload Window doesn't re-capture it), so a fresh install is
+// invisible to a bare PATH lookup until the app fully restarts. When the setting
+// is the bare default, resolve against these known install dirs first — on
+// Windows this also sidesteps that execFile can't PATH-resolve a .bat at all.
+const CLI_INSTALL_DIRS: string[] = isWindows
+  ? [
+      // where install.ps1 lands it: %LOCALAPPDATA%\Programs\allx\bin
+      path.join(
+        process.env.LOCALAPPDATA ?? path.join(os.homedir(), "AppData", "Local"),
+        "Programs",
+        "allx",
+        "bin"
+      ),
+    ]
+  : [
+      "/opt/homebrew/bin", // Homebrew, Apple Silicon
+      "/usr/local/bin", // Homebrew, Intel mac / common Linux prefix
+      path.join(os.homedir(), ".local", "bin"),
+    ];
 
 let resolvedCli: string | undefined;
 
-/**
- * The CLI to execute. An explicit setting (path or custom name) is used as-is;
- * the bare default "allx" is resolved to a known install location when one
- * exists, else left to the process's PATH lookup.
- */
-function cliPath(): string {
-  const configured = vscode.workspace.getConfiguration("alloyx").get<string>("cliPath", "allx");
-  if (configured !== "allx") {
-    return configured;
-  }
+/** The absolute path of a known-good install, if one exists on disk. */
+function cliResolvedAbsolute(): string | undefined {
   if (!resolvedCli) {
     for (const dir of CLI_INSTALL_DIRS) {
-      const candidate = path.join(dir, "allx");
+      const candidate = path.join(dir, CLI_BIN);
       if (fs.existsSync(candidate)) {
         resolvedCli = candidate;
         break;
       }
     }
   }
-  return resolvedCli ?? configured;
+  return resolvedCli;
+}
+
+/**
+ * The CLI to execute. An explicit setting (path or custom name) is used as-is;
+ * the bare default "allx" is resolved to a known install location when one
+ * exists, else left to the process's PATH lookup (the launcher name, so a shell
+ * invocation can PATHEXT-resolve it on Windows).
+ */
+function cliPath(): string {
+  const configured = vscode.workspace.getConfiguration("alloyx").get<string>("cliPath", "allx");
+  if (configured !== "allx") {
+    return configured;
+  }
+  return cliResolvedAbsolute() ?? CLI_BIN;
+}
+
+// ---------------------------------------------------------------------------
+// Invocation. On Windows the launcher is a .bat, which Node's execFile/spawn
+// cannot run directly (CreateProcess does no PATHEXT/cmd resolution). We run it
+// THROUGH cmd.exe with an ARGUMENT ARRAY — never a shell string — so Node does
+// the argv escaping and there is no command line to inject into. `/d /s /c` is
+// exactly what Node itself uses under `shell:true` (no AutoRun, /c = run+exit).
+// On Unix it's a plain execFile/spawn of the resolved binary.
+// ---------------------------------------------------------------------------
+
+/** The (file, argv) to launch the CLI with `args`, wrapping in cmd.exe on Windows. */
+function cliLaunch(args: string[]): { file: string; argv: string[] } {
+  return isWindows
+    ? { file: "cmd.exe", argv: ["/d", "/s", "/c", cliPath(), ...args] }
+    : { file: cliPath(), argv: args };
+}
+
+interface CliOpts {
+  timeout?: number;
+  maxBuffer?: number;
+  env?: NodeJS.ProcessEnv;
+  cwd?: string;
+}
+
+/** execFile-style buffered call, Windows-aware. */
+function cliExec(
+  args: string[],
+  opts: CliOpts,
+  cb: (err: ExecFileException | null, stdout: string, stderr: string) => void
+): ChildProcess {
+  const { file, argv } = cliLaunch(args);
+  return execFile(file, argv, opts, cb);
+}
+
+/** spawn-style streaming call, Windows-aware. */
+function cliSpawn(
+  args: string[],
+  opts: { cwd?: string; env?: NodeJS.ProcessEnv }
+): ChildProcessWithoutNullStreams {
+  const { file, argv } = cliLaunch(args);
+  return spawn(file, argv, opts);
 }
 
 // ---------------------------------------------------------------------------
@@ -71,6 +141,8 @@ function cliPath(): string {
 const RELEASES_URL = "https://github.com/colatusso/alloyx/releases/latest";
 const BREW_CMD = "brew install colatusso/alloyx/allx";
 const BREW_UPGRADE_CMD = "brew upgrade allx";
+const PS_INSTALL_CMD =
+  "irm https://raw.githubusercontent.com/colatusso/alloyx/main/install.ps1 | iex";
 let cliMissingShown = false;
 
 // Lowest CLI version this extension is built against. Bumped at release time when
@@ -83,6 +155,28 @@ function notifyCliMissing(): void {
     return;
   }
   cliMissingShown = true;
+
+  // Windows: a one-line PowerShell install (handles JDK + PATH); offer to copy it.
+  if (isWindows) {
+    void vscode.window
+      .showWarningMessage(
+        `AlloyX needs the allx CLI. Install it from PowerShell: ${PS_INSTALL_CMD}`,
+        "Copy install command",
+        "Set CLI path"
+      )
+      .then((pick) => {
+        if (pick === "Copy install command") {
+          void vscode.env.clipboard.writeText(PS_INSTALL_CMD);
+          void vscode.window.showInformationMessage(
+            "Copied — paste it in PowerShell, then reload the window."
+          );
+        } else if (pick === "Set CLI path") {
+          void vscode.commands.executeCommand("workbench.action.openSettings", "alloyx.cliPath");
+        }
+      });
+    return;
+  }
+
   const isMac = process.platform === "darwin";
   const actions = isMac
     ? ["Copy brew command", "Open releases", "Set CLI path"]
@@ -106,9 +200,27 @@ function notifyCliMissing(): void {
     });
 }
 
+/** Whether the user is on the bare default cliPath (not a custom path/name). */
+function usingDefaultCli(): boolean {
+  return (
+    vscode.workspace.getConfiguration("alloyx").get<string>("cliPath", "allx") === "allx"
+  );
+}
+
 /** Whether this exec error means "the binary itself wasn't found". */
 function isCliMissing(err: unknown): boolean {
-  return !!err && (err as NodeJS.ErrnoException).code === "ENOENT";
+  const e = err as NodeJS.ErrnoException | null;
+  if (!e) {
+    return false;
+  }
+  if (e.code === "ENOENT") {
+    return true; // Unix, or a custom cliPath that doesn't exist
+  }
+  // Windows runs the .bat through cmd.exe, so a missing launcher surfaces as a
+  // non-zero exit ("not recognized"), never ENOENT. When we're on the default
+  // cliPath and resolved no real install, a failed call means it isn't where we
+  // can find it (install.ps1 lands it in a dir we DO search, so this is rare).
+  return isWindows && usingDefaultCli() && !cliResolvedAbsolute();
 }
 
 // ---------------------------------------------------------------------------
@@ -168,8 +280,7 @@ function notifyCliOutdated(found: string | undefined): void {
  * usage — is reported as outdated.
  */
 function checkCliVersion(): void {
-  execFile(
-    cliPath(),
+  cliExec(
     ["--version"],
     { timeout: 15000, env: execEnv() },
     (err, stdout, stderr) => {
@@ -219,8 +330,7 @@ function execEnv(): NodeJS.ProcessEnv {
  */
 function getOutline(absFile: string): Promise<Outline | undefined> {
   return new Promise((resolve) => {
-    execFile(
-      cliPath(),
+    cliExec(
       ["outline", absFile, "--json"],
       // cwd = the file's folder so the `.apexcache/schema` synced next to the
       // classes is found (the workspace root usually has none).
@@ -281,8 +391,7 @@ function buildCallStub(klass: string, m: OutlineMethod): string {
 function runSnippet(snippet: string, dir: string, label: string): void {
   output.show(true);
   output.appendLine(`\n▶ Run  ${label}`);
-  const child = execFile(
-    cliPath(),
+  const child = cliExec(
     ["eval", "--stdin", "--dir", dir, ...orgArgs()],
     // cwd = the classes dir so the synced `.apexcache/schema` is found
     { env: execEnv(), timeout: 60000, maxBuffer: 8 * 1024 * 1024, cwd: dir },
@@ -414,7 +523,7 @@ async function syncSchema(): Promise<void> {
 
   output.show(true);
   output.appendLine(`\n⟳ Sync schema  (org: ${org}, classes: ${dir})`);
-  const child = spawn(cliPath(), ["schema", "sync", ".", "--org", org], {
+  const child = cliSpawn(["schema", "sync", ".", "--org", org], {
     cwd: dir,
     env: execEnv(),
   });
@@ -498,8 +607,7 @@ interface CheckDiag {
 /** Run `allx check` against the given buffer contents (piped via stdin). */
 function checkSource(absFile: string, source: string): Promise<CheckDiag[]> {
   return new Promise((resolve) => {
-    const child = execFile(
-      cliPath(),
+    const child = cliExec(
       ["check", absFile, "--stdin"],
       // cwd = the file's folder so the synced `.apexcache/schema` is found
       { timeout: 15000, maxBuffer: 8 * 1024 * 1024, env: execEnv(), cwd: path.dirname(absFile) },
