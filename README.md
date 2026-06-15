@@ -59,29 +59,43 @@ Two things to keep in mind:
 - **It's the real org.** `insert`/`update`/`delete` change real records in the org you point at, with that user's privileges. Use a **sandbox or scratch org** for anything that writes — don't experiment against production.
 - **Permissions ≠ org runtime.** Inside the org, Apex often runs in *system mode* (e.g. triggers); through the API it runs **as the user**. Results that depend on FLS/sharing can differ from how the same class behaves in the org — "passed locally" isn't "runs identically in the org" for permission-sensitive logic.
 
-## Install & run
+## Install
 
-**Requirements:** a **JDK 21+** — a *JDK*, not a JRE (AlloyX compiles Java at runtime) — and Git. No JDK? Grab [Temurin 21](https://adoptium.net) (`brew install --cask temurin@21`, or with [sdkman](https://sdkman.io): `sdk install java 21-tem`).
+One command per platform — each one also brings the **JDK 21+** AlloyX needs (a *JDK*, not a JRE: it compiles Java at runtime) and puts `allx` on your PATH.
+
+**Windows** (PowerShell) — installs Temurin 21 via winget if missing, unpacks the latest release, sets PATH:
+
+```powershell
+irm https://raw.githubusercontent.com/colatusso/alloyx/main/install.ps1 | iex
+```
+
+**macOS / Linux** (Homebrew) — the formula pulls in `openjdk@21`:
+
+```bash
+brew install colatusso/alloyx/allx
+```
+
+Then open a **new** terminal and try it:
+
+```bash
+allx --version
+allx run examples/Hello.cls --method Hello.run
+# → DEBUG|5
+```
+
+### Build from source
+
+For hacking on AlloyX itself (needs a JDK 21+ and Git):
 
 ```bash
 git clone https://github.com/colatusso/alloyx.git
 cd alloyx
-./gradlew run --args="run examples/Hello.cls --method Hello.run"
-# → DEBUG|5
-```
+./gradlew run --args="run examples/Hello.cls --method Hello.run"   # first run fetches Gradle + deps
 
-The first run downloads Gradle and the dependencies (needs internet).
-
-**Optional — get the `allx` command** (so you can type `allx …` instead of `./gradlew run --args=…`):
-
-```bash
+# optional — put the `allx` launcher on your PATH:
 ./gradlew installDist
-# launcher lands at build/install/allx/bin/allx — symlink it onto your PATH, e.g.:
 ln -s "$PWD/build/install/allx/bin/allx" ~/.local/bin/allx
-allx run examples/Hello.cls --method Hello.run
 ```
-
-> Native installers (`.dmg`/`.msi`, no JDK needed) are coming. For now it's clone + build.
 
 ## Quickstart
 
