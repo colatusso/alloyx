@@ -156,4 +156,60 @@ class SalesforceGatewayTest {
         assertTrue(calls.stream().anyMatch(c -> c.equals("POST https://x.my.salesforce.com"
             + "/services/data/v60.0/sobjects/Account")), "insert POSTs to the collection URL");
     }
+
+    // ------------------------------------------------------------------
+    // sf launch resolution (the Windows PATHEXT fix must not touch *nix)
+    // ------------------------------------------------------------------
+
+    private static boolean isWindows() {
+        return java.lang.System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("win");
+    }
+
+    @Test
+    void launchCommand_passesThroughUnchangedOnUnix() throws Exception {
+        org.junit.jupiter.api.Assumptions.assumeFalse(isWindows(), "Windows resolves via PATHEXT");
+        java.util.List<String> args = java.util.List.of("sf", "org", "display", "--json", "--target-org", "my-org");
+        assertEquals(args, SalesforceGateway.launchCommand(args),
+            "on macOS/Linux the command must be the bare `sf ...` exactly as before");
+    }
+
+    @Test
+    void launchCommand_emptyArgsAreReturnedAsIs() throws Exception {
+        java.util.List<String> empty = java.util.List.of();
+        assertEquals(empty, SalesforceGateway.launchCommand(empty));
+    }
+
+    /** Case-insensitive existence over a fixed set, mimicking Windows' filesystem. */
+    private static java.util.function.Predicate<java.nio.file.Path> present(String... paths) {
+        java.util.Set<String> set = new java.util.HashSet<>();
+        for (String p : paths) {
+            set.add(p.toLowerCase(java.util.Locale.ROOT));
+        }
+        return p -> set.contains(p.toString().toLowerCase(java.util.Locale.ROOT));
+    }
+
+    @Test
+    void resolveOnPath_picksCmdNotExtensionlessUnixWrapper() {
+        // the Salesforce CLI ships BOTH a bare `sf` (bash) and `sf.cmd` in bin\; Windows must
+        // pick sf.cmd — running the extensionless wrapper is CreateProcess error 193.
+        java.nio.file.Path got = SalesforceGateway.resolveOnPath(
+            "sf", "/opt/sfbin", ".COM;.EXE;.BAT;.CMD",
+            present("/opt/sfbin/sf", "/opt/sfbin/sf.cmd"));
+        assertEquals("sf.cmd", got.getFileName().toString().toLowerCase(java.util.Locale.ROOT),
+            "must resolve the Windows sf.cmd, never the extensionless Unix wrapper");
+    }
+
+    @Test
+    void resolveOnPath_prefersExeOverCmd() {
+        java.nio.file.Path got = SalesforceGateway.resolveOnPath(
+            "sf", "/opt/sfbin", ".COM;.EXE;.BAT;.CMD",
+            present("/opt/sfbin/sf.exe", "/opt/sfbin/sf.cmd"));
+        assertEquals("sf.exe", got.getFileName().toString().toLowerCase(java.util.Locale.ROOT),
+            "PATHEXT order prefers a real .exe over .cmd");
+    }
+
+    @Test
+    void resolveOnPath_nullWhenAbsent() {
+        assertNull(SalesforceGateway.resolveOnPath("sf", "/a", ".EXE;.CMD", p -> false));
+    }
 }

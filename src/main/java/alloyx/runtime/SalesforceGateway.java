@@ -420,10 +420,93 @@ public final class SalesforceGateway implements OrgGateway {
 
     // --- real external boundaries (replaced by fakes in tests)
     static String runSf(java.util.List<String> args) throws Exception {
-        Process p = new ProcessBuilder(args).start();
+        Process p = new ProcessBuilder(launchCommand(args)).start();
         String out = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
         p.waitFor();
         return out;
+    }
+
+    /**
+     * Build the actual OS command for {@code args} (whose head is the bare program
+     * name, e.g. {@code "sf"}). On Windows the Salesforce CLI is usually shipped as
+     * {@code sf.cmd}/{@code sf.ps1} (npm), and Java's {@code CreateProcess} does no
+     * PATHEXT resolution — so a bare {@code "sf"} silently fails to launch and auth
+     * never happens. Resolve the real file on PATH: a {@code .exe}/{@code .com} runs
+     * directly; a {@code .cmd}/{@code .bat} can only be launched via {@code cmd.exe}.
+     * On macOS/Linux the command is returned unchanged (historical behaviour).
+     */
+    static java.util.List<String> launchCommand(java.util.List<String> args) throws Exception {
+        boolean windows = java.lang.System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("win");
+        if (!windows || args.isEmpty()) {
+            return args;
+        }
+        java.nio.file.Path exe = resolveOnPath(args.get(0));
+        if (exe == null) {
+            throw new java.io.IOException("`" + args.get(0)
+                + "` was not found on PATH; install the Salesforce CLI and reopen the terminal");
+        }
+        String name = exe.getFileName().toString().toLowerCase(java.util.Locale.ROOT);
+        java.util.List<String> tail = args.subList(1, args.size());
+        if (name.endsWith(".cmd") || name.endsWith(".bat")) {
+            // cmd.exe re-tokenizes its line (%VAR%, & | < > ^ " ( )); only the org alias
+            // is user-influenced here, so reject anything outside a safe alias charset
+            // rather than try to quote — real sf aliases never contain these.
+            for (String a : tail) {
+                if (!a.matches("[A-Za-z0-9._@:/\\\\-]+")) {
+                    throw new java.io.IOException("unsafe character in sf argument: " + a);
+                }
+            }
+            java.util.List<String> cmd = new ArrayList<>(java.util.List.of("cmd.exe", "/c", exe.toString()));
+            cmd.addAll(tail);
+            return cmd;
+        }
+        // .exe/.com (or anything else): launch the resolved absolute path directly
+        java.util.List<String> cmd = new ArrayList<>();
+        cmd.add(exe.toString());
+        cmd.addAll(tail);
+        return cmd;
+    }
+
+    /** First existing PATH entry for {@code name}, trying each PATHEXT extension (Windows). */
+    private static java.nio.file.Path resolveOnPath(String name) {
+        return resolveOnPath(name, java.lang.System.getenv("PATH"), java.lang.System.getenv("PATHEXT"),
+            java.nio.file.Files::isRegularFile);
+    }
+
+    /**
+     * Pure resolver (test seam): first {@code dir\name+ext} that {@code exists} accepts,
+     * scanning PATH dirs in order and, within each, the PATHEXT extensions. The bare name
+     * (no extension) is tried ONLY when {@code name} already carries a dot — never for a
+     * plain {@code "sf"}: the Salesforce CLI ships an extensionless Unix wrapper next to
+     * {@code sf.cmd}, and that bash script is not a valid Win32 executable (CreateProcess
+     * error 193). PATHEXT default order (.COM;.EXE;.BAT;.CMD) prefers a real .exe over .cmd.
+     */
+    static java.nio.file.Path resolveOnPath(String name, String path, String pathext,
+            java.util.function.Predicate<java.nio.file.Path> exists) {
+        if (path == null || path.isBlank()) {
+            return null;
+        }
+        java.util.List<String> exts = new ArrayList<>();
+        if (name.indexOf('.') >= 0) {
+            exts.add(""); // already extensioned (e.g. "sf.cmd") — accept as given
+        }
+        for (String e : (pathext == null || pathext.isBlank() ? ".COM;.EXE;.BAT;.CMD" : pathext).split(";")) {
+            if (!e.isBlank()) {
+                exts.add(e);
+            }
+        }
+        for (String dir : path.split(java.io.File.pathSeparator)) {
+            if (dir.isBlank()) {
+                continue;
+            }
+            for (String ext : exts) {
+                java.nio.file.Path cand = java.nio.file.Path.of(dir, name + ext);
+                if (exists.test(cand)) {
+                    return cand;
+                }
+            }
+        }
+        return null;
     }
 
     static String httpCall(String method, String url, java.util.Map<String, String> headers, String body)
