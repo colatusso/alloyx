@@ -210,6 +210,8 @@ final class Workspace {
         LinkedHashMap<String, Path> closure = new LinkedHashMap<>();
         Deque<String> queue = new ArrayDeque<>();
         queue.add(start);
+        Set<String> queued = new HashSet<>();
+        queued.add(start);
         while (!queue.isEmpty()) {
             String name = queue.poll();
             Path f = index.get(name);
@@ -218,7 +220,8 @@ final class Workspace {
             }
             closure.put(name, f);
             for (Lexer.Token t : Lexer.tokenize(Files.readString(f))) {
-                if (t.kind().equals("IDENT") && index.containsKey(t.value())) {
+                if (t.kind().equals("IDENT") && index.containsKey(t.value())
+                        && queued.add(t.value())) {
                     queue.add(t.value());
                 }
             }
@@ -241,8 +244,10 @@ final class Workspace {
         }
         LinkedHashMap<String, Path> closure = new LinkedHashMap<>();
         Deque<String> queue = new ArrayDeque<>();
+        Set<String> queued = new HashSet<>();
         for (Lexer.Token t : Lexer.tokenize(source)) {
-            if (t.kind().equals("IDENT") && index.containsKey(t.value())) {
+            if (t.kind().equals("IDENT") && index.containsKey(t.value())
+                    && queued.add(t.value())) {
                 queue.add(t.value());
             }
         }
@@ -254,34 +259,13 @@ final class Workspace {
             }
             closure.put(name, f);
             for (Lexer.Token t : Lexer.tokenize(Files.readString(f))) {
-                if (t.kind().equals("IDENT") && index.containsKey(t.value())) {
+                if (t.kind().equals("IDENT") && index.containsKey(t.value())
+                        && queued.add(t.value())) {
                     queue.add(t.value());
                 }
             }
         }
         return new ArrayList<>(closure.values());
-    }
-
-    /**
-     * The workspace classes referenced DIRECTLY in {@code source} — its superclass
-     * and the classes used in its body — first level only, no transitive closure.
-     * Used by `check` to resolve inherited members and external types without
-     * dragging in the whole dependency tree. {@code self} is excluded.
-     */
-    static List<Path> directDeps(String source, Path dir, String self) throws IOException {
-        Map<String, Path> index = new HashMap<>();
-        if (dir != null && Files.isDirectory(dir)) {
-            for (Path p : clsAt(dir)) {
-                index.put(classNameOf(p), p);
-            }
-        }
-        LinkedHashMap<String, Path> out = new LinkedHashMap<>();
-        for (Lexer.Token t : Lexer.tokenize(source)) {
-            if (t.kind().equals("IDENT") && !t.value().equals(self) && index.containsKey(t.value())) {
-                out.putIfAbsent(t.value(), index.get(t.value()));
-            }
-        }
-        return new ArrayList<>(out.values());
     }
 
     /**
@@ -315,15 +299,9 @@ final class Workspace {
     record Diag(String severity, int line, int column, String message) {}
 
     /**
-     * Type-check a single .cls for editor feedback (the `allx check` MVP): compile ONLY
-     * the target (plus any typed sObject classes the schema can describe), collect javac
-     * diagnostics, keep only the target's, and translate their lines back to the .cls.
-     *
-     * Deps aren't compiled here, so references to other org classes surface as "cannot
-     * find symbol". Those whose name is a known workspace class are dropped (just not
-     * loaded); an unknown name is kept — it's a real first-level typo. Self-contained
-     * checks (primitives, own members, and sObject fields once a schema is synced) are
-     * validated for real.
+     * Type-check one .cls for editor feedback. The target and every workspace class it
+     * transitively references are compiled together, while diagnostics remain scoped to
+     * the target's original Apex coordinates.
      */
     static List<Diag> check(Path target) throws Exception {
         return check(target, null, CACHE_DIR);
@@ -370,72 +348,27 @@ final class Workspace {
     private static List<Diag> checkInto(Path target, String src, Parser.Parsed parsed, ClassDecl cls,
             alloyx.runtime.SchemaCache schema, Path cacheDir, Path outDir) throws Exception {
 
-        // Compile the open class together with the classes it references DIRECTLY
-        // (its superclass + the workspace classes used in its body) — first level
-        // only. Without them every inherited field/method and every external type
-        // reads as a bogus "cannot find symbol". The deps' own diagnostics are
-        // dropped below; only the open file's are surfaced. A dep that doesn't
-        // parse/transpile is skipped (best effort), costing only residual (filtered)
-        // diagnostics.
+        // Compile the open class with every transitively referenced workspace class.
+        // The closure is seeded from src, not target on disk, so an editor's unsaved
+        // buffer determines its dependencies. Diagnostics from dependencies are still
+        // dropped below: only the file the developer is editing is reported.
         Path dir = target.toAbsolutePath().getParent();
         List<ClassDecl> decls = new ArrayList<>();
         decls.add(cls);
-        for (Path dep : directDeps(src, dir, cls.name())) {
+        Set<String> loaded = new HashSet<>();
+        loaded.add(cls.name());
+        for (Path dep : resolveDepsForSource(src, dir)) {
+            if (classNameOf(dep).equalsIgnoreCase(cls.name())) {
+                continue;
+            }
             try {
-                decls.add(Parser.parse(Files.readString(dep)));
+                ClassDecl dependency = Parser.parse(Files.readString(dep));
+                if (loaded.add(dependency.name())) {
+                    decls.add(dependency);
+                }
             } catch (RuntimeException | StackOverflowError skip) {
-                // unparseable dep: leave it out
-            }
-        }
-        // Pull in the inheritance chain (extends/implements) of the target and its
-        // direct deps, recursively, so inherited members (a repository's save()) and
-        // base/interface types resolve. Structural ancestors only — not general
-        // transitive use — so the compile set stays small.
-        Map<String, Path> wsIndex = new HashMap<>();
-        if (dir != null && Files.isDirectory(dir)) {
-            for (Path pth : clsAt(dir)) {
-                wsIndex.put(classNameOf(pth), pth);
-            }
-        }
-        Set<String> have = new HashSet<>();
-        for (ClassDecl d : decls) {
-            have.add(d.name());
-        }
-        Deque<ClassDecl> pending = new ArrayDeque<>(decls);
-        while (!pending.isEmpty()) {
-            ClassDecl d = pending.poll();
-            // follow nested types too: an inner class may implement an interface that
-            // must be in the compile set for the inner to satisfy it (e.g. a proxy's
-            // ServiceSoap implements SoapProxyService).
-            if (d.inners() != null) {
-                for (ClassDecl inner : d.inners()) {
-                    pending.add(inner);
-                }
-            }
-            List<String> supers = new ArrayList<>();
-            if (d.superclass() != null) {
-                supers.add(d.superclass());
-            }
-            if (d.interfaces() != null) {
-                supers.addAll(d.interfaces());
-            }
-            for (String s : supers) {
-                String name = s.replaceAll("<.*>", "").trim();
-                int dotAt = name.lastIndexOf('.');
-                if (dotAt >= 0) {
-                    name = name.substring(dotAt + 1);
-                }
-                if (have.contains(name) || !wsIndex.containsKey(name)) {
-                    continue;
-                }
-                try {
-                    ClassDecl ancestor = Parser.parse(Files.readString(wsIndex.get(name)));
-                    decls.add(ancestor);
-                    have.add(name);
-                    pending.add(ancestor);
-                } catch (RuntimeException | StackOverflowError skip) {
-                    // unparseable ancestor: leave it out
-                }
+                // An unparseable dependency is checked when opened. Keep this target
+                // responsive and let javac report any consequent target-side issue.
             }
         }
         Set<String> userClasses = new HashSet<>();
