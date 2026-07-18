@@ -9,6 +9,7 @@ import {
   ChildProcessWithoutNullStreams,
   ExecFileException,
 } from "child_process";
+import { isCliUpdateAvailable, parseLatestReleaseVersion, parseSemver } from "./cli-version";
 
 // ---------------------------------------------------------------------------
 // Types mirroring the JSON emitted by `allx outline <file> --json`.
@@ -191,6 +192,8 @@ function cliSpawn(
 // install it, once per session, with the right instruction per platform.
 // ---------------------------------------------------------------------------
 const RELEASES_URL = "https://github.com/colatusso/alloyx/releases/latest";
+const LATEST_RELEASE_API = "https://api.github.com/repos/colatusso/alloyx/releases/latest";
+const LATEST_RELEASE_TIMEOUT_MS = 5000;
 const BREW_CMD = "brew install colatusso/alloyx/allx";
 const BREW_UPGRADE_CMD = "brew upgrade allx";
 const PS_INSTALL_CMD =
@@ -198,9 +201,6 @@ const PS_INSTALL_CMD =
 let cliMissingShown = false;
 let jdkMissingShown = false;
 
-// Lowest CLI version this extension is built against. Bumped at release time when
-// the extension starts to rely on a newer CLI feature/output. Warning-only.
-const MIN_CLI_VERSION = "0.2.0";
 let cliOutdatedShown = false;
 
 function notifyCliMissing(): void {
@@ -303,34 +303,12 @@ function maybeNotifyMissing(err: unknown): void {
 }
 
 // ---------------------------------------------------------------------------
-// CLI version gate. After the CLI is found, probe `allx --version` once and warn
-// (never block) when it's older than what this extension is built against. An old
-// CLI predates --version, so it prints usage / exits non-zero / has no semver in
-// its output — all treated as outdated. Generic numeric semver comparison only.
+// CLI update check. At activation we compare the installed CLI against GitHub's
+// latest stable release. It is warning-only and never blocks Apex features.
 // ---------------------------------------------------------------------------
 
-/** Compare dotted numeric versions. Returns <0, 0, >0 like a comparator. */
-function compareVersions(a: string, b: string): number {
-  const pa = a.split(".").map((n) => parseInt(n, 10));
-  const pb = b.split(".").map((n) => parseInt(n, 10));
-  const len = Math.max(pa.length, pb.length);
-  for (let i = 0; i < len; i++) {
-    const x = pa[i] ?? 0;
-    const y = pb[i] ?? 0;
-    if (x !== y) {
-      return x - y;
-    }
-  }
-  return 0;
-}
-
-/** First `MAJOR.MINOR.PATCH` in the text, or undefined if there's none. */
-function parseSemver(text: string): string | undefined {
-  return text.match(/\d+\.\d+\.\d+/)?.[0];
-}
-
-/** One-per-session warning that the installed CLI is older than recommended. */
-function notifyCliOutdated(found: string | undefined): void {
+/** One-per-session warning that the installed CLI is behind the latest release. */
+function notifyCliOutdated(found: string | undefined, latest: string): void {
   if (cliOutdatedShown) {
     return;
   }
@@ -339,7 +317,7 @@ function notifyCliOutdated(found: string | undefined): void {
   const actions = isMac ? ["Copy brew command"] : ["Open releases"];
   void vscode.window
     .showWarningMessage(
-      `AlloyX CLI ${found ?? "(unknown)"} is older than the recommended ${MIN_CLI_VERSION}.`,
+      `AlloyX CLI ${found ?? "(version unavailable)"} is older than the latest release ${latest}.`,
       ...actions
     )
     .then((pick) => {
@@ -353,11 +331,29 @@ function notifyCliOutdated(found: string | undefined): void {
 }
 
 /**
- * Probe the resolved CLI's version once. Missing binary is left to the
- * notifyCliMissing flow (we do nothing here). Anything that isn't a recognizable
- * semver >= MIN_CLI_VERSION — including a pre-`--version` CLI that errors/prints
- * usage — is reported as outdated.
+ * Retrieve the current stable CLI version. Network failures are intentionally
+ * silent: an update check must not interfere with the editor.
  */
+async function fetchLatestCliVersion(): Promise<string | undefined> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), LATEST_RELEASE_TIMEOUT_MS);
+  try {
+    const response = await fetch(LATEST_RELEASE_API, {
+      headers: {
+        Accept: "application/vnd.github+json",
+        "User-Agent": "alloyx-vscode",
+      },
+      signal: controller.signal,
+    });
+    return response.ok ? parseLatestReleaseVersion(await response.text()) : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/** Probe the installed CLI once, then compare it with the latest stable release. */
 function checkCliVersion(): void {
   cliExec(
     ["--version"],
@@ -367,11 +363,13 @@ function checkCliVersion(): void {
       if (e && e.code === "ENOENT") {
         return; // allx or the JDK is absent — a feature call reports it; not a version signal
       }
-      // success, or an old CLI predating --version (usage / non-zero exit / no semver)
+      // A pre-`--version` CLI has no semver, so it is offered the current release.
       const found = parseSemver(`${stdout ?? ""}\n${stderr ?? ""}`);
-      if (!found || compareVersions(found, MIN_CLI_VERSION) < 0) {
-        notifyCliOutdated(found);
-      }
+      void fetchLatestCliVersion().then((latest) => {
+        if (latest && isCliUpdateAvailable(found, latest)) {
+          notifyCliOutdated(found, latest);
+        }
+      });
     }
   );
 }

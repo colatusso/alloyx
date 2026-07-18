@@ -46,6 +46,10 @@ describes the sObjects your classes reference into a local cache, and saves the 
 
 The extension drives the `allx` CLI — install that first.
 
+When VS Code activates the extension, it checks GitHub's latest stable AlloyX
+release and shows a one-time warning if the installed CLI is older. The check
+does not block editor features and is silent if GitHub is unavailable.
+
 **macOS (Homebrew):** one command, the JDK comes along as a dependency:
 
 ```bash
@@ -62,7 +66,7 @@ to the launcher (`bin\allx.bat` on Windows, `bin/allx` on Linux). You also need 
 `.vsix` on the release page:
 
 ```bash
-code --install-extension alloyx-vscode-0.1.1.vsix
+code --install-extension alloyx-vscode-0.2.3.vsix
 ```
 
 **JDK not found? (macOS GUI)** — when VS Code is launched from the Dock it doesn't
