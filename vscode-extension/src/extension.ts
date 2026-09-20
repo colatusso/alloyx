@@ -380,6 +380,15 @@ function orgArgs(): string[] {
   return org ? ["--org", org] : [];
 }
 
+/** Build eval argv for a CodeLens invocation without changing ordinary eval semantics. */
+export function buildRunEvalArgs(
+  dir: string,
+  isTest: boolean,
+  configuredOrgArgs: string[] = []
+): string[] {
+  return ["eval", "--stdin", "--dir", dir, ...(isTest ? ["--test"] : []), ...configuredOrgArgs];
+}
+
 /**
  * Environment for the allx child process. The VS Code GUI usually lacks JAVA_HOME
  * (it doesn't source the login shell), so the allx launcher falls back to the macOS
@@ -442,7 +451,7 @@ function getOutline(absFile: string): Promise<Outline | undefined> {
 const output = vscode.window.createOutputChannel("AlloyX");
 
 // run buffers we opened -> the classes dir to resolve against + a label to show.
-const runBuffers = new Map<string, { dir: string; label: string }>();
+const runBuffers = new Map<string, { dir: string; label: string; isTest: boolean }>();
 const runLenses = new vscode.EventEmitter<void>();
 
 /**
@@ -464,11 +473,11 @@ function buildCallStub(klass: string, m: OutlineMethod): string {
  * the result to the AlloyX panel, headed by "▶ Run <label>". The CLI command is an
  * implementation detail — the user sees "Run", not "eval".
  */
-function runSnippet(snippet: string, dir: string, label: string): void {
+function runSnippet(snippet: string, dir: string, label: string, isTest = false): void {
   output.show(true);
   output.appendLine(`\n▶ Run  ${label}`);
   const child = cliExec(
-    ["eval", "--stdin", "--dir", dir, ...orgArgs()],
+    buildRunEvalArgs(dir, isTest, orgArgs()),
     // cwd = the classes dir so the synced `.apexcache/schema` is found
     { env: execEnv(), timeout: 60000, maxBuffer: 8 * 1024 * 1024, cwd: dir },
     (err, stdout, stderr) => {
@@ -493,7 +502,11 @@ async function openRunBuffer(file: string, klass: string, m: OutlineMethod): Pro
   const header = `// Run ${label} — fill in the arguments, then ▶ Run (above). Runs locally.`;
   const content = `${header}\n${buildCallStub(klass, m)}\n`;
   const doc = await vscode.workspace.openTextDocument({ language: "apex", content });
-  runBuffers.set(doc.uri.toString(), { dir: path.dirname(file), label });
+  runBuffers.set(doc.uri.toString(), {
+    dir: path.dirname(file),
+    label,
+    isTest: m.isTest === true,
+  });
   runLenses.fire(); // make the "▶ Run" lens show up on the fresh buffer
   await vscode.window.showTextDocument(doc);
 }
@@ -501,7 +514,7 @@ async function openRunBuffer(file: string, klass: string, m: OutlineMethod): Pro
 /** Single entry point: run now if there are no args, else open a buffer to fill them. */
 async function runMethod(file: string, klass: string, m: OutlineMethod): Promise<void> {
   if (!m.params || m.params.length === 0) {
-    runSnippet(buildCallStub(klass, m), path.dirname(file), `${klass}.${m.name}`);
+    runSnippet(buildCallStub(klass, m), path.dirname(file), `${klass}.${m.name}`, m.isTest === true);
   } else {
     await openRunBuffer(file, klass, m);
   }
@@ -551,7 +564,7 @@ function runBuffer(uriStr?: string): void {
     vscode.workspace.getWorkspaceFolder(doc.uri)?.uri.fsPath ??
     vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
     path.dirname(doc.uri.fsPath);
-  runSnippet(doc.getText(), dir, info?.label ?? "anonymous Apex");
+  runSnippet(doc.getText(), dir, info?.label ?? "anonymous Apex", info?.isTest === true);
 }
 
 /**
@@ -676,6 +689,53 @@ interface CheckDiag {
   message: string;
 }
 
+function checkFailure(message: string): CheckDiag[] {
+  return [{ severity: "ERROR", line: 1, column: 1, message }];
+}
+
+function isCheckDiag(value: unknown): value is CheckDiag {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const diag = value as Record<string, unknown>;
+  return (
+    typeof diag.severity === "string" &&
+    typeof diag.line === "number" &&
+    typeof diag.column === "number" &&
+    typeof diag.message === "string"
+  );
+}
+
+/** Convert the CLI's stdout into diagnostics, preserving malformed output as a visible error. */
+export function parseCheckOutput(stdout: string): CheckDiag[] {
+  try {
+    const parsed: unknown = JSON.parse(stdout.trim());
+    if (!Array.isArray(parsed) || !parsed.every(isCheckDiag)) {
+      return checkFailure("AlloyX check returned invalid diagnostics.");
+    }
+    return parsed;
+  } catch {
+    return checkFailure("AlloyX check returned invalid diagnostics.");
+  }
+}
+
+/** Keep a failed child process distinct from a successful lint with zero diagnostics. */
+export function diagnosticsFromCheckResult(err: unknown, stdout: string): CheckDiag[] {
+  if (err) {
+    return checkFailure("AlloyX check failed; diagnostics are unavailable.");
+  }
+  return parseCheckOutput(stdout);
+}
+
+/** Do not publish a check result after the document changed or closed while it was running. */
+export function shouldPublishDiagnostics(
+  startedVersion: number,
+  currentVersion: number,
+  isClosed: boolean
+): boolean {
+  return !isClosed && startedVersion === currentVersion;
+}
+
 /** Run `allx check` against the given buffer contents (piped via stdin). */
 function checkSource(absFile: string, source: string): Promise<CheckDiag[]> {
   return new Promise((resolve) => {
@@ -685,11 +745,7 @@ function checkSource(absFile: string, source: string): Promise<CheckDiag[]> {
       { timeout: 15000, maxBuffer: 8 * 1024 * 1024, env: execEnv(), cwd: path.dirname(absFile) },
       (err, stdout) => {
         maybeNotifyMissing(err);
-        try {
-          resolve(JSON.parse(stdout.trim()) as CheckDiag[]);
-        } catch {
-          resolve([]); // crash/garbage output -> publish nothing
-        }
+        resolve(diagnosticsFromCheckResult(err, stdout));
       }
     );
     child.stdin?.end(source);
@@ -717,7 +773,11 @@ async function refreshDiagnostics(
   if (!doc.uri.fsPath.endsWith(".cls")) {
     return;
   }
+  const startedVersion = doc.version;
   const found = await checkSource(doc.uri.fsPath, doc.getText());
+  if (!shouldPublishDiagnostics(startedVersion, doc.version, doc.isClosed)) {
+    return;
+  }
   collection.set(
     doc.uri,
     found.map((d) => {

@@ -5,6 +5,7 @@ package alloyx.runtime;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
@@ -133,7 +134,7 @@ class SalesforceGatewayTest {
     // ------------------------------------------------------------------
 
     @Test
-    void upsert_routesByIdPresence() {
+    void upsert_routesSingleRecordByIdPresence() {
         java.util.List<String> calls = new ArrayList<>();
         SalesforceGateway.HttpCaller http = (method, url, headers, body) -> {
             calls.add(method + " " + url);
@@ -141,20 +142,61 @@ class SalesforceGatewayTest {
         };
 
         SalesforceGateway g = new SalesforceGateway("o", okAuth(), http);
-        List<SObject> recs = new List<>();
-        recs.add(new SObject("Account", "Id", "001AAA", "Name", "HasId1"));
-        recs.add(new SObject("Account", "Id", "001BBB", "Name", "HasId2"));
-        recs.add(new SObject("Account", "Name", "NoId"));
-        g.upsert(recs);
+        g.upsert(new List<>(java.util.List.of(
+            new SObject("Account", "Id", "001AAA", "Name", "HasId"))));
+        g.upsert(new List<>(java.util.List.of(
+            new SObject("Account", "Name", "NoId"))));
 
-        long patches = calls.stream().filter(c -> c.startsWith("PATCH")).count();
-        long posts = calls.stream().filter(c -> c.startsWith("POST")).count();
-        assertEquals(2, patches, "the two records with an Id go down the update/PATCH path");
-        assertEquals(1, posts, "the record without an Id goes down the insert/POST path");
+        assertEquals(1, calls.stream().filter(c -> c.startsWith("PATCH")).count(),
+            "a record with an Id goes down the update/PATCH path");
+        assertEquals(1, calls.stream().filter(c -> c.startsWith("POST")).count(),
+            "a record without an Id goes down the insert/POST path");
         assertTrue(calls.stream().anyMatch(c -> c.contains("/sobjects/Account/001AAA")),
             "update PATCHes by Id");
         assertTrue(calls.stream().anyMatch(c -> c.equals("POST https://x.my.salesforce.com"
             + "/services/data/v60.0/sobjects/Account")), "insert POSTs to the collection URL");
+    }
+
+    @Test
+    void rejectsMultiRecordDmlBeforeAuthOrHttp() {
+        java.util.List<String> calls = new ArrayList<>();
+        SalesforceGateway.HttpCaller http = (method, url, headers, body) -> {
+            calls.add(method + " " + url);
+            return "{}";
+        };
+        SalesforceGateway g = new SalesforceGateway("o", okAuth(), http);
+        List<SObject> records = new List<>();
+        records.add(new SObject("Account", "Name", "A"));
+        records.add(new SObject("Account", "Name", "B"));
+
+        assertThrows(UnsupportedOperationException.class, () -> g.insert(records));
+        assertThrows(UnsupportedOperationException.class, () -> g.update(records));
+        assertThrows(UnsupportedOperationException.class, () -> g.delete(records));
+        assertThrows(UnsupportedOperationException.class, () -> g.upsert(records));
+
+        assertEquals(java.util.List.of(), calls, "the guard must run before auth and HTTP");
+    }
+
+    @Test
+    void rejectsDmlDuringLocalTestBeforeAuthOrHttp() throws Exception {
+        java.util.List<String> calls = new ArrayList<>();
+        SalesforceGateway.HttpCaller http = (method, url, headers, body) -> {
+            calls.add(method + " " + url);
+            return "{}";
+        };
+        SalesforceGateway g = new SalesforceGateway("o", okAuth(), http);
+        List<SObject> records = new List<>();
+        records.add(new SObject("Account", "Name", "A"));
+
+        alloyx.runtime.Test.runLocalTest(() -> {
+            assertThrows(UnsupportedOperationException.class, () -> g.insert(records));
+            assertThrows(UnsupportedOperationException.class, () -> g.update(records));
+            assertThrows(UnsupportedOperationException.class, () -> g.delete(records));
+            assertThrows(UnsupportedOperationException.class, () -> g.upsert(records));
+            return null;
+        });
+
+        assertEquals(java.util.List.of(), calls, "the guard must run before auth and HTTP");
     }
 
     // ------------------------------------------------------------------
@@ -183,7 +225,7 @@ class SalesforceGatewayTest {
     private static java.util.function.Predicate<java.nio.file.Path> present(String... paths) {
         java.util.Set<String> set = new java.util.HashSet<>();
         for (String p : paths) {
-            set.add(p.toLowerCase(java.util.Locale.ROOT));
+            set.add(java.nio.file.Path.of(p).toString().toLowerCase(java.util.Locale.ROOT));
         }
         return p -> set.contains(p.toString().toLowerCase(java.util.Locale.ROOT));
     }

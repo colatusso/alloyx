@@ -37,7 +37,13 @@ final class Lexer {
     static List<Token> tokenize(String src) {
         List<Token> tokens = new ArrayList<>();
         Matcher m = MASTER.matcher(src);
+        int end = 0;
         while (m.find()) {
+            if (m.start() != end) {
+                throw new RuntimeException(
+                    "unexpected character '" + src.charAt(end) + "' (line "
+                        + lineNum(src, end) + ")");
+            }
             String kind = null;
             for (String k : KINDS) {
                 if (m.group(k) != null) {
@@ -47,11 +53,26 @@ final class Lexer {
             }
             if (kind == null || kind.equals("WS")
                 || kind.equals("COMMENTLINE") || kind.equals("COMMENTBLOCK")) {
+                end = m.end();
                 continue;
             }
             tokens.add(new Token(kind, m.group(), m.start()));
+            end = m.end();
+        }
+        if (end != src.length()) {
+            throw new RuntimeException(
+                "unexpected character '" + src.charAt(end) + "' (line "
+                    + lineNum(src, end) + ")");
         }
         tokens.add(new Token("EOF", "", src.length()));
         return tokens;
+    }
+
+    private static int lineNum(String src, int offset) {
+        int line = 1;
+        for (int k = 0; k < offset; k++) {
+            if (src.charAt(k) == '\n') line++;
+        }
+        return line;
     }
 }

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Rafael Colatusso
 package alloyx;
 
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
@@ -32,6 +32,15 @@ class LexerTest {
 
     @Test
     void unterminatedQuote_doesNotStackOverflow() {
-        assertDoesNotThrow(() -> Lexer.tokenize("x = '" + "b".repeat(200_000)));
+        assertThrows(RuntimeException.class,
+            () -> Lexer.tokenize("x = '" + "b".repeat(200_000)));
+    }
+
+    @Test
+    void unknownCharacter_isRejectedWithSourceLine() {
+        RuntimeException error = assertThrows(RuntimeException.class,
+            () -> Lexer.tokenize("x = 1\n# + 2"));
+        assertTrue(error.getMessage().contains("'#'"), error.getMessage());
+        assertTrue(error.getMessage().contains("line 2"), error.getMessage());
     }
 }

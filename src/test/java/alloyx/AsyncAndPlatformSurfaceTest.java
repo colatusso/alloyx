@@ -30,13 +30,13 @@ class AsyncAndPlatformSurfaceTest {
     }
 
     @Test
-    void databaseSavepoint_isOpaque_rollbackIsHonest() {
-        // setSavepoint() hands back an opaque Savepoint; rollback can't faithfully undo org state
-        // locally, so it degrades rather than silently lying about the data.
-        alloyx.runtime.Database.Savepoint sp = alloyx.runtime.Database.setSavepoint();
-        assertTrue(sp != null);
+    void databaseSavepoint_failsBeforePretendingToCreateState() {
+        // There is no local transaction state to back a Savepoint. Returning an opaque token would
+        // let caller code continue while rollback could never undo an org-side write.
         assertThrows(UnsupportedOperationException.class,
-            () -> alloyx.runtime.Database.rollback(sp));
+            () -> alloyx.runtime.Database.setSavepoint());
+        assertThrows(UnsupportedOperationException.class,
+            () -> alloyx.runtime.Database.rollback(null));
     }
 
     @Test

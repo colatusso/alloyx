@@ -32,49 +32,78 @@ public final class Database {
     // Apex DML returns per-row result objects (Database.SaveResult[] and friends). The records
     // are processed through the gateway; the per-row outcome isn't modeled locally yet, so the
     // results are recognized for type-checking but inspecting one fails clearly (see DmlResult).
-    // The extra arg (allOrNone / DmlOptions / external-id field) doesn't change local behavior.
+    // SalesforceGateway currently uses single-record REST calls. A list with more than one record
+    // therefore cannot honor Apex's default allOrNone transaction, so reject it before any request.
     public static List<SaveResult> insert(Object records) {
-        List<SObject> r = asList(records);
+        rejectLocalTestDml("insert");
+        List<SObject> r = singleRecordOrEmpty(records, "insert");
         gateway.insert(r);
         return filled(r.size(), SaveResult::new);
     }
 
     public static List<SaveResult> insert(Object records, Object allOrNoneOrOptions) {
-        return insert(records);
+        throw unsupportedDmlOptions("insert");
     }
 
     public static List<SaveResult> update(Object records) {
-        List<SObject> r = asList(records);
+        rejectLocalTestDml("update");
+        List<SObject> r = singleRecordOrEmpty(records, "update");
         gateway.update(r);
         return filled(r.size(), SaveResult::new);
     }
 
     public static List<SaveResult> update(Object records, Object allOrNoneOrOptions) {
-        return update(records);
+        throw unsupportedDmlOptions("update");
     }
 
     public static List<DeleteResult> delete(Object records) {
-        List<SObject> r = asList(records);
+        rejectLocalTestDml("delete");
+        List<SObject> r = singleRecordOrEmpty(records, "delete");
         gateway.delete(r);
         return filled(r.size(), DeleteResult::new);
     }
 
     public static List<DeleteResult> delete(Object records, Object allOrNoneOrOptions) {
-        return delete(records);
+        throw unsupportedDmlOptions("delete");
     }
 
     public static List<UpsertResult> upsert(Object records) {
-        List<SObject> r = asList(records);
+        rejectLocalTestDml("upsert");
+        List<SObject> r = singleRecordOrEmpty(records, "upsert");
         gateway.upsert(r);
         return filled(r.size(), UpsertResult::new);
     }
 
     public static List<UpsertResult> upsert(Object records, Object externalIdField) {
-        return upsert(records);
+        throw Unsupported.notLocal(
+            "Database.upsert(..., externalIdField) is not supported without external-id semantics");
     }
 
     public static List<UpsertResult> upsert(Object records, Object externalIdField, Object allOrNone) {
-        return upsert(records);
+        throw unsupportedDmlOptions("upsert with externalIdField");
+    }
+
+    private static List<SObject> singleRecordOrEmpty(Object records, String operation) {
+        List<SObject> out = asList(records);
+        if (out.size() > 1) {
+            throw Unsupported.notLocal(
+                "Database." + operation + "(List) cannot honor allOrNone locally; "
+                    + "only single-record DML is supported");
+        }
+        return out;
+    }
+
+    private static UnsupportedOperationException unsupportedDmlOptions(String operation) {
+        return Unsupported.notLocal(
+            "Database." + operation + "(..., allOrNone/DmlOptions) is not supported locally");
+    }
+
+    private static void rejectLocalTestDml(String operation) {
+        if (Test.isRunningTest()) {
+            throw Unsupported.notLocal(
+                "Database." + operation
+                    + " is disabled during local @isTest because no transaction isolation exists");
+        }
     }
 
     private static <T> List<T> filled(int n, java.util.function.Supplier<T> make) {
@@ -98,18 +127,17 @@ public final class Database {
 
     // --- Savepoint / rollback -----------------------------------------------------------------
     // DML hits the org through the gateway when connected. A local "rollback" that no-op'd would
-    // LIE about the data state (the inserted/updated rows are already in the org), so rollback
-    // degrades honestly. setSavepoint hands back an opaque token so the declared type resolves and
-    // the savepoint variable round-trips through code, even though it carries no undoable state.
+    // LIE about the data state (the inserted/updated rows are already in the org), so both sides of
+    // the savepoint contract fail before an effect rather than returning an opaque simulator.
 
-    /** Opaque transaction savepoint token (Apex {@code System.Savepoint}). Carries no local state. */
+    /** Type surface for Apex {@code System.Savepoint}; local creation is unsupported. */
     public static final class Savepoint {
         private Savepoint() {
         }
     }
 
     public static Savepoint setSavepoint() {
-        return new Savepoint();
+        throw Unsupported.notLocal("Database.setSavepoint()");
     }
 
     public static void rollback(Savepoint savepoint) {

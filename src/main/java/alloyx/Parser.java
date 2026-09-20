@@ -30,7 +30,10 @@ final class Parser {
     }
 
     static ClassDecl parse(String src) {
-        return new Parser(Lexer.tokenize(src), src).parseClass();
+        Parser p = new Parser(Lexer.tokenize(src), src);
+        ClassDecl cls = p.parseClass();
+        p.expectEndOfSource();
+        return cls;
     }
 
     // parse plus the statement->Apex-line map, so a javac error on the generated
@@ -40,7 +43,16 @@ final class Parser {
     static Parsed parseWithLines(String src) {
         Parser p = new Parser(Lexer.tokenize(src), src);
         ClassDecl cls = p.parseClass();
+        p.expectEndOfSource();
         return new Parsed(cls, p.stmtLines);
+    }
+
+    private void expectEndOfSource() {
+        if (!peek().kind().equals("EOF")) {
+            Token t = peek();
+            throw new RuntimeException(
+                "unexpected token '" + t.value() + "' after top-level class (" + lineOf(t) + ")");
+        }
     }
 
     private Token peek() {
@@ -210,7 +222,6 @@ final class Parser {
         List<ClassDecl> inners = new ArrayList<>();
         while (!at("}")) {
             Object member = parseMember(name);
-            if (member == null) continue; // tolerated static{} block
             if (member instanceof Field f) fields.add(f);
             else if (member instanceof ClassDecl inner) inners.add(inner); // nested type
             else if (member instanceof List<?> group) {
@@ -255,6 +266,10 @@ final class Parser {
                 word.append("[]");
             }
             parts.add(word.toString());
+        }
+        if (parts.isEmpty()) {
+            Token t = peek();
+            throw new RuntimeException("unexpected token '" + t.value() + "' (" + lineOf(t) + ")");
         }
         String name = parts.get(parts.size() - 1);
         boolean isStatic = kwIndex(parts.subList(0, parts.size() - 1), "static") >= 0;
@@ -307,41 +322,73 @@ final class Parser {
                 boolean innerAbstract = kwIndex(parts, "abstract") >= 0;
                 return parseClassBody(innerName, sup, innerInterfaces, kw, innerAbstract);
             }
-            // property (Type name { get; set; }) or a static{} initializer block
-            skipBalancedBraces();
-            accept(";"); // tolerate a trailing ';'
+            // Auto-properties are represented as fields. Arbitrary property/accessor bodies and
+            // static initializer blocks are not emitted, so reject them instead of dropping
+            // potentially invalid Apex and reporting a false clean check.
             if (parts.size() < 2) {
-                return null; // static initializer — not emitted
+                boolean staticInitializer = parts.size() == 1
+                    && parts.get(0).equalsIgnoreCase("static");
+                String kind = staticInitializer ? "static initializer blocks" : "member blocks";
+                throw unsupported(kind + " are not supported", peek());
             }
-            // auto-property modelled as a plain field (get/set body, if any, is dropped)
-            return new Field(parts.get(parts.size() - 2), name, null, isStatic);
+            parseAutoPropertyBody();
+            accept(";"); // tolerate a trailing ';'
+            // auto-property modelled as a plain field
+            return new Field(parts.get(parts.size() - 2), name, null, isStatic, anns);
         }
         // field — Apex allows several on one line: Type a = x, b, c = z;
         String fieldType = parts.size() >= 2 ? parts.get(parts.size() - 2) : "Object";
         Expr init = accept("=") ? parseExpr() : null;
         if (!at(",")) {
             expect(";");
-            return new Field(fieldType, name, init, isStatic);
+            return new Field(fieldType, name, init, isStatic, anns);
         }
         List<Field> group = new ArrayList<>();
-        group.add(new Field(fieldType, name, init, isStatic));
+        group.add(new Field(fieldType, name, init, isStatic, anns));
         while (accept(",")) {
             String fname = advance().value(); // next field shares the type
             Expr finit = accept("=") ? parseExpr() : null;
-            group.add(new Field(fieldType, fname, finit, isStatic));
+            group.add(new Field(fieldType, fname, finit, isStatic, anns));
         }
         expect(";");
         return group;
     }
 
-    private void skipBalancedBraces() {
-        expect("{");
-        int depth = 1;
-        while (depth > 0 && !peek().kind().equals("EOF")) {
-            String v = advance().value();
-            if (v.equals("{")) depth++;
-            else if (v.equals("}")) depth--;
+    private void parseAutoPropertyBody() {
+        Token opening = expect("{");
+        boolean sawAccessor = false;
+        while (!at("}")) {
+            if (peek().kind().equals("EOF")) {
+                throw unsupported("unterminated auto-property", opening);
+            }
+            // Apex permits a restricted visibility modifier on an accessor, most commonly
+            // `private set;`. Keep that useful auto-property form while rejecting bodies.
+            if (at("public") || at("private") || at("protected") || at("global")) {
+                advance();
+            }
+            Token accessor = peek();
+            if (!accessor.kind().equals("IDENT")
+                || (!accessor.value().equalsIgnoreCase("get")
+                    && !accessor.value().equalsIgnoreCase("set"))) {
+                throw unsupported("property accessor bodies or syntax are not supported", accessor);
+            }
+            advance();
+            if (at("{")) {
+                throw unsupported("property accessor bodies are not supported", peek());
+            }
+            if (!accept(";")) {
+                throw unsupported("property accessor bodies or syntax are not supported", peek());
+            }
+            sawAccessor = true;
         }
+        expect("}");
+        if (!sawAccessor) {
+            throw unsupported("auto-property requires get; or set;", opening);
+        }
+    }
+
+    private RuntimeException unsupported(String message, Token token) {
+        return new RuntimeException(message + " (" + lineOf(token) + ")");
     }
 
     private Param parseParam() {
@@ -399,7 +446,9 @@ final class Parser {
         if (DML_OPS.contains(kw)) {
             advance();
             Expr v = parseExpr();
-            while (!at(";") && !peek().kind().equals("EOF")) advance(); // tolerate extra (e.g. upsert field)
+            if (!at(";")) {
+                throw unsupported("extra tokens after " + kw + " are not supported", peek());
+            }
             expect(";");
             return new Dml(kw, v);
         }

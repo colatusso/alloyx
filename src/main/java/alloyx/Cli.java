@@ -4,6 +4,7 @@ package alloyx;
 
 import alloyx.runtime.Database;
 import alloyx.runtime.SalesforceGateway;
+import alloyx.runtime.Test;
 import java.lang.reflect.InvocationTargetException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -37,7 +38,7 @@ public final class Cli {
             default -> {
                 java.lang.System.err.println(
                     "usage: allx (run <File.cls> --method Class.method [--args v1 v2 ...] "
-                        + "| eval (<File>|--stdin) [--dir <classesDir>] "
+                        + "| eval (<File>|--stdin) [--dir <classesDir>] [--test] "
                         + "| check <File.cls> [--stdin] "
                         + "| test <path> | transpile <File.cls> | outline <File.cls> "
                         + "| schema (sync (<path>|--obj A,B) | refresh)) [--org alias] "
@@ -239,21 +240,24 @@ public final class Cli {
         String className = method.contains(".") ? method.substring(0, method.indexOf('.')) : method;
         String methodName = method.contains(".") ? method.substring(method.indexOf('.') + 1) : method;
 
-        Class<?> clazz = compiled.load(className);
-        java.lang.reflect.Method m = findMethod(clazz, methodName, callArgs.size());
-        // static -> invoke on null; instance method -> new up the class (no-arg ctor)
-        Object receiver = java.lang.reflect.Modifier.isStatic(m.getModifiers())
-            ? null
-            : clazz.getDeclaredConstructor().newInstance();
-        Object result = m.invoke(receiver, coerceArgs(m.getParameterTypes(), callArgs));
-        if (m.getReturnType() != void.class) {
-            java.lang.System.out.println("=> " + result);
+        // Inspect the AST that was compiled for this invocation. This keeps the test context
+        // tied to the actual @isTest method rather than to a caller-supplied flag that could be
+        // omitted by `allx run`.
+        boolean localTest = isTestMethod(compiled, className, methodName, callArgs.size());
+        if (localTest) {
+            Test.runLocalTest(() -> {
+                invokeRunMethod(compiled, className, methodName, callArgs);
+                return null;
+            });
+        } else {
+            invokeRunMethod(compiled, className, methodName, callArgs);
         }
     }
 
     /**
-     * `allx eval (<File>|--stdin) [--dir <classesDir>] [--org alias]`: run an
-     * anonymous Apex block locally. The snippet is wrapped in a throwaway class,
+     * `allx eval (<File>|--stdin) [--dir <classesDir>] [--org alias] [--test]`: run an
+     * anonymous Apex block locally. {@code --test} scopes the local test guard to this invocation;
+     * without it, eval remains ordinary Execute Anonymous. The snippet is wrapped in a throwaway class,
      * compiled together with the workspace classes it references (resolved from
      * --dir), and executed on the JVM — System.debug prints to stdout. This is a
      * local Execute Anonymous: the editor uses it to invoke a method with the
@@ -263,12 +267,14 @@ public final class Cli {
         String org = null;
         Path dir = Path.of(".");
         boolean stdin = false;
+        boolean localTest = false;
         String file = null;
         for (int i = 1; i < args.length; i++) {
             switch (args[i]) {
                 case "--org" -> org = args[++i];
                 case "--dir" -> dir = Path.of(args[++i]);
                 case "--stdin" -> stdin = true;
+                case "--test" -> localTest = true;
                 default -> {
                     if (!args[i].startsWith("--") && file == null) {
                         file = args[i];
@@ -309,6 +315,33 @@ public final class Cli {
 
         List<Path> deps = Workspace.resolveDepsForSource(snippet, dir.toAbsolutePath());
         Workspace.Compiled compiled = Workspace.compile(deps, List.of(scratch), Config.cacheDir(dir));
+        if (localTest) {
+            Test.runLocalTest(() -> {
+                invokeEval(compiled, scratchClass);
+                return null;
+            });
+        } else {
+            invokeEval(compiled, scratchClass);
+        }
+    }
+
+    private static void invokeRunMethod(
+            Workspace.Compiled compiled, String className, String methodName, List<String> callArgs)
+            throws Exception {
+        Class<?> clazz = compiled.load(className);
+        java.lang.reflect.Method m = findMethod(clazz, methodName, callArgs.size());
+        // static -> invoke on null; instance method -> new up the class (no-arg ctor)
+        Object receiver = java.lang.reflect.Modifier.isStatic(m.getModifiers())
+            ? null
+            : clazz.getDeclaredConstructor().newInstance();
+        Object result = m.invoke(receiver, coerceArgs(m.getParameterTypes(), callArgs));
+        if (m.getReturnType() != void.class) {
+            java.lang.System.out.println("=> " + result);
+        }
+    }
+
+    private static void invokeEval(Workspace.Compiled compiled, String scratchClass)
+            throws Exception {
         try {
             compiled.load(scratchClass).getMethod("run").invoke(null);
         } catch (InvocationTargetException ite) {
@@ -318,6 +351,22 @@ public final class Cli {
                 + (cause.getMessage() != null ? ": " + cause.getMessage() : ""));
             java.lang.System.exit(1);
         }
+    }
+
+    private static boolean isTestMethod(
+            Workspace.Compiled compiled, String className, String methodName, int argc) {
+        for (ClassDecl decl : compiled.classes()) {
+            if (!decl.name().equals(className)) {
+                continue;
+            }
+            for (MethodDecl method : decl.methods()) {
+                if (method.name().equals(methodName)
+                        && method.params().size() == argc) {
+                    return method.isTest();
+                }
+            }
+        }
+        return false;
     }
 
     /** Pick the public method matching name + argument count (no overload by type). */
@@ -371,7 +420,10 @@ public final class Cli {
                     continue;
                 }
                 try {
-                    compiled.load(decl.name()).getMethod(m.name()).invoke(null);
+                    Test.runLocalTest(() -> {
+                        compiled.load(decl.name()).getMethod(m.name()).invoke(null);
+                        return null;
+                    });
                     passed++;
                     java.lang.System.out.println("PASS  " + decl.name() + "." + m.name());
                 } catch (Throwable t) {

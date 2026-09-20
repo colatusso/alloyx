@@ -4,17 +4,43 @@ package alloyx.runtime;
 
 /**
  * Apex's Test namespace. Recognized so production code that guards on the test context
- * (Test.isRunningTest()) type-checks and runs. There is no Apex test engine locally, so
- * isRunningTest() is honestly false; the mocking, fixture and governor entry points aren't
+ * (Test.isRunningTest()) type-checks and runs. The local CLI marks each @isTest invocation with a
+ * scoped test-context flag, but it does not emulate Salesforce's per-method transaction, static
+ * state, governor, or fixture isolation. The mocking, fixture and governor entry points aren't
  * modeled yet and fail clearly if called.
  */
 public final class Test {
+    private static final ThreadLocal<Boolean> RUNNING_TEST =
+        ThreadLocal.withInitial(() -> false);
+
     private Test() {
     }
 
-    /** No Apex unit test runs locally, so this is honestly false. */
+    /** True only while a local test runner invokes a scoped test action. */
     public static boolean isRunningTest() {
-        return false;
+        return RUNNING_TEST.get();
+    }
+
+    /**
+     * Runs one Java-side local test action with the test guard enabled.
+     *
+     * <p>This is deliberately scoped to a {@link java.util.concurrent.Callable}: Apex can observe
+     * {@link #isRunningTest()} but has no public enter/exit operation that can disable the guard
+     * around its own DML. The previous state is restored for nested Java-side runners.
+     */
+    public static <T> T runLocalTest(java.util.concurrent.Callable<T> action) throws Exception {
+        java.util.Objects.requireNonNull(action, "local test action");
+        boolean wasRunning = RUNNING_TEST.get();
+        RUNNING_TEST.set(true);
+        try {
+            return action.call();
+        } finally {
+            if (wasRunning) {
+                RUNNING_TEST.set(true);
+            } else {
+                RUNNING_TEST.remove();
+            }
+        }
     }
 
     public static void startTest() {

@@ -125,6 +125,8 @@ public final class SalesforceGateway implements OrgGateway {
 
     @Override
     public void insert(List<SObject> records) {
+        rejectLocalTestDml("insert");
+        requireSingleRecord("insert", records);
         try {
             ensureAuth();
             for (SObject r : records) {
@@ -142,6 +144,8 @@ public final class SalesforceGateway implements OrgGateway {
 
     @Override
     public void update(List<SObject> records) {
+        rejectLocalTestDml("update");
+        requireSingleRecord("update", records);
         try {
             ensureAuth();
             for (SObject r : records) {
@@ -157,10 +161,12 @@ public final class SalesforceGateway implements OrgGateway {
 
     @Override
     public void upsert(List<SObject> records) {
-        // REST has no batch upsert by Id, so split per the same rule the REST API uses:
+        rejectLocalTestDml("upsert");
+        requireSingleRecord("upsert", records);
+        // REST has no batch upsert by Id, so route one record by the same rule the REST API uses:
         // a record carrying an Id is an UPDATE (PATCH /sobjects/<Type>/<Id>), one without
         // is an INSERT (POST /sobjects/<Type>). The gateway's upsert carries no external-id
-        // field (Database.upsert drops it locally), so the by-external-id endpoint isn't used.
+        // field (Database.upsert rejects that overload), so the by-external-id endpoint isn't used.
         List<SObject> toInsert = new List<>();
         List<SObject> toUpdate = new List<>();
         for (SObject r : records) {
@@ -181,6 +187,8 @@ public final class SalesforceGateway implements OrgGateway {
 
     @Override
     public void delete(List<SObject> records) {
+        rejectLocalTestDml("delete");
+        requireSingleRecord("delete", records);
         try {
             ensureAuth();
             for (SObject r : records) {
@@ -189,6 +197,28 @@ public final class SalesforceGateway implements OrgGateway {
             }
         } catch (Exception e) {
             throw new RuntimeException(e);
+        }
+    }
+
+    /**
+     * REST sObject endpoints above perform one request per record. Treating a list as a successful
+     * DML operation would therefore allow an early record to commit before a later request fails,
+     * which is not Apex's default allOrNone contract. Database guards this same boundary before it
+     * reaches the gateway; keep the check here too for direct gateway callers.
+     */
+    private static void requireSingleRecord(String operation, List<SObject> records) {
+        if (records != null && records.size() > 1) {
+            throw Unsupported.notLocal(
+                "SalesforceGateway." + operation + "(List) cannot provide atomic multi-record DML; "
+                    + "only single-record requests are supported");
+        }
+    }
+
+    private static void rejectLocalTestDml(String operation) {
+        if (Test.isRunningTest()) {
+            throw Unsupported.notLocal(
+                "SalesforceGateway." + operation
+                    + " is disabled during local @isTest because no transaction isolation exists");
         }
     }
 

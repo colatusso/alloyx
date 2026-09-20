@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import alloyx.runtime.ApexPages;
 import alloyx.runtime.Datetime;
@@ -13,6 +14,7 @@ import alloyx.runtime.PageReference;
 import alloyx.runtime.Test;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Extra Test-namespace surface fixture code leans on. {@code getStandardPricebookId()} hands
@@ -22,6 +24,9 @@ import org.junit.jupiter.api.BeforeEach;
  * requires an org, so it degrades clearly.
  */
 class TestSurfaceTest {
+    @TempDir
+    java.nio.file.Path dir;
+
 
     @BeforeEach
     @AfterEach
@@ -52,6 +57,35 @@ class TestSurfaceTest {
         // mutating an audit field needs an org transaction — no local equivalent
         assertThrows(UnsupportedOperationException.class,
             () -> Test.setCreatedDate("001000000000001", Datetime.now()));
+    }
+
+    @org.junit.jupiter.api.Test
+    void isRunningTestIsScopedToTheLocalRunnerContext() throws Exception {
+        assertEquals(false, Test.isRunningTest());
+        Test.runLocalTest(() -> {
+            assertEquals(true, Test.isRunningTest());
+            return null;
+        });
+        assertEquals(false, Test.isRunningTest());
+    }
+
+    @org.junit.jupiter.api.Test
+    void apexCannotCallTheLocalTestExitHook() throws Exception {
+        java.nio.file.Files.createDirectories(dir.resolve(".apexcache"));
+        java.nio.file.Path f = dir.resolve("Bypass.cls");
+        java.nio.file.Files.writeString(f, """
+            public class Bypass {
+                public static void go() {
+                    Test.exitLocalTest();
+                    Database.insert(new SObject('Account'));
+                }
+            }
+            """);
+
+        java.util.List<Workspace.Diag> diags = Workspace.check(
+            f, null, dir.resolve(".apexcache"));
+        assertTrue(diags.stream().anyMatch(d -> d.message().contains("exitLocalTest")),
+            diags.toString());
     }
 
     @org.junit.jupiter.api.Test

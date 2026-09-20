@@ -110,14 +110,28 @@ class ProjectRootCacheTest {
             "schema in the discovered .apexcache must type Account so a.Name resolves clean");
     }
 
-    /** No marker anywhere: fall back to CWD-relative .apexcache (retrocompat for flat layouts). */
+    /** Use the first real ancestor marker, or fall back to CWD-relative cache when none exists. */
     @Test
-    void noMarkerFallsBackToCwdRelative() throws Exception {
+    void firstAncestorMarkerOrCwdFallback() throws Exception {
         Path target = writeCls(dir, "Uses", USES_ACCOUNT);
         Path resolved = Config.cacheDir(target);
-        // CWD-relative: the absolute form of the bare ".apexcache" the engine has always used
-        assertEquals(Path.of(".apexcache").toAbsolutePath(), resolved,
-            "no alloyx.json/.apexcache anywhere -> the historical CWD-relative cache");
+        assertEquals(expectedCacheDir(target), resolved,
+            "cache must use the first marker, or the historical CWD-relative fallback");
+    }
+
+    private Path expectedCacheDir(Path target) {
+        Path current = target.toAbsolutePath();
+        if (Files.isRegularFile(current)) {
+            current = current.getParent();
+        }
+        while (current != null) {
+            if (Files.isRegularFile(current.resolve(Config.CONFIG_NAME))
+                    || Files.isDirectory(current.resolve(Config.CACHE_NAME))) {
+                return current.resolve(Config.CACHE_NAME).toAbsolutePath();
+            }
+            current = current.getParent();
+        }
+        return Path.of(".apexcache").toAbsolutePath();
     }
 
     /** Referencing an sObject with no schema loaded warns exactly once. */

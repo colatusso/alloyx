@@ -3,6 +3,7 @@
 package alloyx;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.nio.file.Files;
@@ -39,8 +40,11 @@ class SurfaceIntegrationTest {
             """);
         Class<?> c = Workspace.compile(List.of(p)).load("Ops");
         assertEquals("00Q1|Closed - Converted", c.getMethod("buildLead").invoke(null));
-        // savepoint() returns an opaque token (compiles + runs)
-        c.getMethod("savepoint").invoke(null);
+        // savepoint has a type surface, but creation fails before pretending to hold transaction state
+        java.lang.reflect.InvocationTargetException savepointFailure = assertThrows(
+            java.lang.reflect.InvocationTargetException.class,
+            () -> c.getMethod("savepoint").invoke(null));
+        assertInstanceOf(UnsupportedOperationException.class, savepointFailure.getCause());
         assertThrows(java.lang.reflect.InvocationTargetException.class,
             () -> c.getMethod("runBatch").invoke(null));
         assertThrows(java.lang.reflect.InvocationTargetException.class,

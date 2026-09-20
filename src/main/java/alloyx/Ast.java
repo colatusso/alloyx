@@ -32,7 +32,15 @@ record ClassDecl(String name, List<MethodDecl> methods, List<Field> fields,
     }
 }
 
-record Field(String type, String name, Expr init, boolean isStatic) {}
+record Field(String type, String name, Expr init, boolean isStatic, List<String> annotations) {
+    Field {
+        annotations = List.copyOf(annotations);
+    }
+
+    Field(String type, String name, Expr init, boolean isStatic) {
+        this(type, name, init, isStatic, List.of());
+    }
+}
 
 record Param(String type, String name) {}
 
